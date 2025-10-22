@@ -1,0 +1,33 @@
+name: Build docker image
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-container:
+    runs-on: debian-tools
+    steps:
+      - name: Set up Docker Buildx
+        uses: Public-Mirrors/docker_setup-buildx-action@v3
+
+      - name: Checkout code
+        uses: Public-Mirrors/actions_checkout@v4
+
+      - name: Login to Forgejo Registry
+        uses: Public-Mirrors/docker_login-action@v3
+        with:
+          registry: ${{ vars.FORGEJO_REGISTRY }}
+          username: ${{ secrets.FORGEJO_REGISTRY_USERNAME }}
+          password: ${{ secrets.FORGEJO_REGISTRY_PASSWORD }}
+
+      - name: Build and push to Forgejo Registry
+        uses: Public-Mirrors/docker_build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ vars.FORGEJO_IMAGE_NAME }}:latest
+          cache-from: type=registry,ref=${{ vars.FORGEJO_IMAGE_NAME }}:latest
+          cache-to: type=inline

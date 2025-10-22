@@ -1,0 +1,13 @@
+{
+    "settings": {
+        "log_level": "test-debug",
+        "test_mode": true,
+        "fake_setting_1": "dummy-value-abc",
+        "fake_setting_2": 42,
+        "test_array": [
+            "fake1",
+            "fake2",
+            "fake3"
+        ]
+    }
+}

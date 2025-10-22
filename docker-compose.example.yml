@@ -1,0 +1,123 @@
+# Working Test Example: PostgreSQL + MongoDB with Sample Data
+# This is a complete, runnable example you can test locally
+#
+# Quick Start:
+# 1. Run: docker compose -f docker-compose.example.yml up -d
+# 2. Wait for services to start (~10 seconds)
+# 3. Run manual backup: docker compose -f docker-compose.example.yml exec backup /backup-scripts/backup-now.sh
+# 4. Check backups: docker compose -f docker-compose.example.yml exec backup /backup-scripts/list-backups.sh
+# 5. View backup files: ls -lh test-backups/
+#
+# All configuration is inline - no .env file needed for testing!
+# For automated testing: `./test.sh` or `just test` (see TESTING.md)
+
+services:
+  # PostgreSQL database with sample data
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: testuser
+      POSTGRES_PASSWORD: testpass123
+      POSTGRES_DB: testdb
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./init-test-postgres.sh:/docker-entrypoint-initdb.d/init-test-postgres.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testuser -d testdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    # ports:
+    #   - "5432:5432"
+
+  # MongoDB database with sample data
+  mongo:
+    image: mongo:8
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: testuser
+      MONGO_INITDB_ROOT_PASSWORD: testpass123
+      MONGO_INITDB_DATABASE: testdb
+    volumes:
+      - mongo-data:/data/db
+      - ./init-test-mongo.js:/docker-entrypoint-initdb.d/init-test-mongo.js:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    # ports:
+    #   - "27017:27017"
+
+  # Sample app that writes to a data directory
+  app:
+    image: alpine:3
+    volumes:
+      - app-data:/app/data
+      # Direct file mount (not a volume/directory)
+      - ./test-config.json:/app/config.json:ro
+    command: >
+      sh -c 'mkdir -p /app/data &&
+             echo "Application started at $$(date)" > /app/data/app.log &&
+             echo "Config file: $$(cat /app/config.json | head -1)" &&
+             while true; do
+               echo "$$(date): Application running, data files: $$(ls -la /app/data/ | wc -l)" >> /app/data/app.log;
+               echo "Sample data line $$(date +%s)" >> /app/data/sample.txt;
+               sleep 30;
+             done'
+    depends_on:
+      db:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+
+  # Backup sidecar
+  backup:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      # Backup name (REQUIRED) - identifies your backups
+      BACKUP_NAME: docker-backup-sidecar-test
+      # Local backup path (must match volume mount)
+      BACKUP_LOCAL_PATH: /backups-local
+      # Encryption key (CHANGE THIS IN PRODUCTION!)
+      BACKUP_ENCRYPTION_KEY: test-encryption-key-change-in-production
+      # PostgreSQL connection
+      BACKUP_POSTGRES: postgresql://testuser:testpass123@db:5432/testdb
+      # MongoDB connection
+      BACKUP_MONGODB: mongodb://testuser:testpass123@mongo:27017/testdb?authSource=admin
+      # Directories to backup
+      BACKUP_DIRS: /app/data:app-data
+      # Individual files to backup (including directly mounted files)
+      BACKUP_FILES: /app/config.json:app-config
+      # Retention policy
+      BACKUP_RETENTION_DAYS: 7
+      # Timezone
+      TZ: America/New_York
+      # Schedule (comment out for manual testing mode)
+      # BACKUP_SCHEDULE: "*/2 * * * *"
+    volumes:
+      # Docker socket for container management
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # App data to backup (read-only), remove ":ro" to allow a restore
+      - app-data:/app/data:ro
+      # Directly mounted file to backup (read-only)
+      - ./test-config.json:/app/config.json:ro
+      # Local backup storage
+      - ./test-backups:/backups-local
+    depends_on:
+      db:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+      app:
+        condition: service_started
+    # No command needed! Entrypoint handles everything:
+    # - If BACKUP_SCHEDULE is set, runs cron automatically
+    # - If BACKUP_SCHEDULE is not set, runs in manual mode
+    # To enable scheduled backups, uncomment BACKUP_SCHEDULE above
+
+volumes:
+  app-data:
+  db-data:
+  mongo-data:
