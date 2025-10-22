@@ -1,3 +1,25 @@
+# Test artifacts
 test-backups/
-.env
 *.log
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Backup files
+backups/
+*.tar.gz
+*.tar.gz.gpg
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Temporary files
+tmp/
+temp/

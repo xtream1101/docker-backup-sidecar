@@ -42,8 +42,10 @@ services:
   # Add the backup sidecar
   backup:
     build:
-      context: https://github.com/yourusername/docker-backup-sidecar.git
+      context: .
       dockerfile: Dockerfile
+    # Or pull from registry:
+    # image: your-registry/docker-backup-sidecar:latest
     restart: unless-stopped
     env_file:
       - .env

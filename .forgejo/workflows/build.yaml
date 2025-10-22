@@ -1,12 +1,54 @@
-name: Build docker image
+name: Build and Test
+
 on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
 
 jobs:
-  build-container:
+  lint:
+    name: Lint Shell Scripts
     runs-on: debian-tools
+    steps:
+      - name: Checkout code
+        uses: Public-Mirrors/actions_checkout@v4
+
+      - name: Install shellcheck
+        run: |
+          apt-get update && apt-get install -y shellcheck || true
+
+      - name: Run shellcheck
+        run: |
+          shellcheck scripts/*.sh test.sh init-test-postgres.sh || echo "Shellcheck warnings found - please review"
+        continue-on-error: true
+
+  test:
+    name: Run Tests
+    runs-on: debian-tools
+    steps:
+      - name: Checkout code
+        uses: Public-Mirrors/actions_checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: Public-Mirrors/docker_setup-buildx-action@v3
+
+      - name: Build test image
+        run: |
+          docker compose -f docker-compose.example.yml build
+
+      - name: Run test suite
+        run: |
+          chmod +x test.sh
+          ./test.sh all
+
+  build-container:
+    name: Build Multi-Platform Image
+    runs-on: debian-tools
+    needs: [lint, test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Set up Docker Buildx
         uses: Public-Mirrors/docker_setup-buildx-action@v3

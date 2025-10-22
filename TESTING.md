@@ -70,7 +70,7 @@ Failed:       0
 ## Development Workflow
 
 1. Before changes: `just test`
-2. just your changes
+2. Make your changes
 3. After changes: `just test`
 4. If tests fail: `just up` to debug
 5. Commit with confidence!
