@@ -327,13 +327,217 @@ load_backup() {
     esac
 }
 
-# Delete old backups from local storage
+# Parse timestamp from backup filename
+# Expected format: backupname-YYYY-MM-DD-HHMMSS.tar.gz[.gpg]
+parse_backup_timestamp() {
+    local filename="$1"
+    # Extract timestamp: YYYY-MM-DD-HHMMSS
+    echo "$filename" | sed -n 's/.*-\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}-[0-9]\{6\}\)\.tar\.gz.*/\1/p'
+}
+
+# Convert timestamp to Unix epoch (seconds since 1970-01-01)
+timestamp_to_epoch() {
+    local timestamp="$1"
+    # Format: YYYY-MM-DD-HHMMSS -> YYYY-MM-DD HH:MM:SS
+    local date_part="${timestamp:0:10}"
+    local time_part="${timestamp:11:2}:${timestamp:13:2}:${timestamp:15:2}"
+
+    # Use date command (works with BusyBox, GNU, and BSD date)
+    date -d "$date_part $time_part" +%s 2>/dev/null || date -j -f "%Y-%m-%d %H:%M:%S" "$date_part $time_part" +%s 2>/dev/null || echo "0"
+}
+
+# Get start of day/week/month/year for a given timestamp
+get_period_start() {
+    local epoch="$1"
+    local period="$2" # day, week, month, year
+
+    case "$period" in
+        "day")
+            date -d "@$epoch" +%Y-%m-%d 2>/dev/null || date -r "$epoch" +%Y-%m-%d 2>/dev/null
+            ;;
+        "week")
+            # Get Monday of the week (ISO week)
+            local dow
+            dow=$(date -d "@$epoch" +%u 2>/dev/null || date -r "$epoch" +%u 2>/dev/null)
+            local offset=$((dow - 1))
+            local week_start=$((epoch - (offset * 86400)))
+            date -d "@$week_start" +%Y-W%V 2>/dev/null || date -r "$week_start" +%Y-W%V 2>/dev/null
+            ;;
+        "month")
+            date -d "@$epoch" +%Y-%m 2>/dev/null || date -r "$epoch" +%Y-%m 2>/dev/null
+            ;;
+        "year")
+            date -d "@$epoch" +%Y 2>/dev/null || date -r "$epoch" +%Y 2>/dev/null
+            ;;
+    esac
+}
+
+# Classify backups into GFS tiers and select which to keep
+# Returns list of filenames to keep (one per line)
+classify_backups_gfs() {
+    local backup_list="$1"
+    local current_epoch
+    current_epoch=$(date +%s)
+
+    # Get retention settings (defaults match common use cases)
+    local retention_recent="${BACKUP_RETENTION_RECENT:-14}"  # Keep last 14 backups
+    local retention_daily="${BACKUP_RETENTION_DAILY:-7}"     # Keep 7 daily backups
+    local retention_weekly="${BACKUP_RETENTION_WEEKLY:-4}"   # Keep 4 weekly backups
+    local retention_monthly="${BACKUP_RETENTION_MONTHLY:-0}" # Keep 0 monthly backups (disabled by default)
+    local retention_yearly="${BACKUP_RETENTION_YEARLY:-0}"   # Keep 0 yearly backups (disabled by default)
+
+    log_debug "GFS Retention Policy: Recent=$retention_recent, Daily=$retention_daily, Weekly=$retention_weekly, Monthly=$retention_monthly, Yearly=$retention_yearly"
+
+    # Arrays to track selected backups for each tier
+    declare -A recent_backups
+    declare -A daily_backups
+    declare -A weekly_backups
+    declare -A monthly_backups
+    declare -A yearly_backups
+
+    # Parse all backups and extract timestamps
+    local -a backup_epochs
+    local -a backup_files
+
+    while IFS= read -r backup_file; do
+        [ -z "$backup_file" ] && continue
+
+        local timestamp
+        timestamp=$(parse_backup_timestamp "$backup_file")
+
+        if [ -z "$timestamp" ]; then
+            log_debug "Skipping file with invalid timestamp format: $backup_file"
+            continue
+        fi
+
+        local epoch
+        epoch=$(timestamp_to_epoch "$timestamp")
+
+        if [ "$epoch" = "0" ]; then
+            log_debug "Could not parse timestamp for: $backup_file"
+            continue
+        fi
+
+        backup_epochs+=("$epoch")
+        backup_files+=("$backup_file")
+    done <<<"$backup_list"
+
+    # Sort backups by epoch (newest first)
+    local -a sorted_indices
+    while IFS= read -r idx; do
+        sorted_indices+=("$idx")
+    done < <(
+        for i in "${!backup_epochs[@]}"; do
+            echo "${backup_epochs[$i]} $i"
+        done | sort -rn | awk '{print $2}'
+    )
+
+    # Tier 1: Recent backups (keep last N)
+    local recent_count=0
+    for idx in "${sorted_indices[@]}"; do
+        if [ "$recent_count" -lt "$retention_recent" ]; then
+            recent_backups["${backup_files[$idx]}"]=1
+            ((recent_count++))
+        fi
+    done
+
+    # Tier 2: Daily backups (one per day)
+    for idx in "${sorted_indices[@]}"; do
+        local epoch="${backup_epochs[$idx]}"
+        local age_days=$(((current_epoch - epoch) / 86400))
+
+        if [ "$age_days" -le "$retention_daily" ]; then
+            local day_key
+            day_key=$(get_period_start "$epoch" "day")
+
+            if [ -z "${daily_backups[$day_key]:-}" ]; then
+                daily_backups["$day_key"]="${backup_files[$idx]}"
+            fi
+        fi
+    done
+
+    # Tier 3: Weekly backups (one per week)
+    for idx in "${sorted_indices[@]}"; do
+        local epoch="${backup_epochs[$idx]}"
+        local age_weeks=$(((current_epoch - epoch) / 604800))
+
+        if [ "$age_weeks" -le "$retention_weekly" ]; then
+            local week_key
+            week_key=$(get_period_start "$epoch" "week")
+
+            if [ -z "${weekly_backups[$week_key]:-}" ]; then
+                weekly_backups["$week_key"]="${backup_files[$idx]}"
+            fi
+        fi
+    done
+
+    # Tier 4: Monthly backups (one per month)
+    for idx in "${sorted_indices[@]}"; do
+        local epoch="${backup_epochs[$idx]}"
+        local age_months=$(((current_epoch - epoch) / 2592000))
+
+        if [ "$age_months" -le "$retention_monthly" ]; then
+            local month_key
+            month_key=$(get_period_start "$epoch" "month")
+
+            if [ -z "${monthly_backups[$month_key]:-}" ]; then
+                monthly_backups["$month_key"]="${backup_files[$idx]}"
+            fi
+        fi
+    done
+
+    # Tier 5: Yearly backups (one per year)
+    for idx in "${sorted_indices[@]}"; do
+        local epoch="${backup_epochs[$idx]}"
+        local age_years=$(((current_epoch - epoch) / 31536000))
+
+        if [ "$age_years" -le "$retention_yearly" ]; then
+            local year_key
+            year_key=$(get_period_start "$epoch" "year")
+
+            if [ -z "${yearly_backups[$year_key]:-}" ]; then
+                yearly_backups["$year_key"]="${backup_files[$idx]}"
+            fi
+        fi
+    done
+
+    # Combine all backups to keep (using associative array to deduplicate)
+    declare -A keep_set
+
+    # Add recent backups
+    for file in "${!recent_backups[@]}"; do
+        keep_set["$file"]=1
+    done
+
+    # Add daily backups
+    for file in "${daily_backups[@]}"; do
+        keep_set["$file"]=1
+    done
+
+    # Add weekly backups
+    for file in "${weekly_backups[@]}"; do
+        keep_set["$file"]=1
+    done
+
+    # Add monthly backups
+    for file in "${monthly_backups[@]}"; do
+        keep_set["$file"]=1
+    done
+
+    # Add yearly backups
+    for file in "${yearly_backups[@]}"; do
+        keep_set["$file"]=1
+    done
+
+    # Output files to keep (one per line)
+    for file in "${!keep_set[@]}"; do
+        echo "$file"
+    done
+}
+
+# Delete old backups from local storage using GFS policy
 cleanup_old_local_backups() {
     local backup_prefix="$1"
-    local retention_days="${BACKUP_RETENTION_DAYS:-30}"
-
-    log_info "Cleaning up local backups older than $retention_days days..."
-
     local backup_dir="${BACKUP_LOCAL_PATH}/${backup_prefix}"
 
     if [ ! -d "$backup_dir" ]; then
@@ -341,50 +545,93 @@ cleanup_old_local_backups() {
         return 0
     fi
 
-    # Use find to delete files older than retention period
-    find "$backup_dir" -type f -mtime "+${retention_days}" -print0 | while IFS= read -r -d '' file; do
-        log_info "Deleting old local backup: $(basename "$file")"
-        rm -f "$file" || log_warn "Failed to delete $file"
-    done
+    log_info "Applying GFS retention policy to local backups..."
+
+    # Get list of all backup files
+    local backup_list
+    backup_list=$(find "$backup_dir" -type f -name "*.tar.gz*" -printf "%f\n" 2>/dev/null | sort -r)
+
+    if [ -z "$backup_list" ]; then
+        log_debug "No local backups found"
+        return 0
+    fi
+
+    # Get list of backups to keep
+    local keep_list
+    keep_list=$(classify_backups_gfs "$backup_list")
+
+    # Convert keep list to associative array for fast lookup
+    declare -A keep_set
+    while IFS= read -r file; do
+        [ -n "$file" ] && keep_set["$file"]=1
+    done <<<"$keep_list"
+
+    # Delete backups not in keep list
+    local deleted_count=0
+    local kept_count=0
+
+    while IFS= read -r backup_file; do
+        [ -z "$backup_file" ] && continue
+
+        if [ -z "${keep_set[$backup_file]:-}" ]; then
+            log_info "Deleting old local backup: $backup_file"
+            rm -f "${backup_dir}/${backup_file}" || log_warn "Failed to delete $backup_file"
+            deleted_count=$((deleted_count + 1))
+        else
+            kept_count=$((kept_count + 1))
+        fi
+    done <<<"$backup_list"
+
+    log_info "Local retention: kept $kept_count backups, deleted $deleted_count backups"
 }
 
-# Delete old backups from S3
+# Delete old backups from S3 using GFS policy
 cleanup_old_s3_backups() {
     local s3_prefix="$1"
-    local retention_days="${BACKUP_RETENTION_DAYS:-30}"
-
-    log_info "Cleaning up S3 backups older than $retention_days days..."
 
     if ! configure_s3; then
         log_warn "S3 cleanup skipped - configuration failed"
         return 0
     fi
 
-    # Calculate cutoff date (works with BusyBox, GNU, and BSD date)
-    local current_timestamp
-    local cutoff_date
-    current_timestamp=$(date +%s)
-    cutoff_date=$((current_timestamp - (retention_days * 86400)))
+    log_info "Applying GFS retention policy to S3 backups..."
 
-    aws s3 ls "s3://${BACKUP_S3_BUCKET}/${s3_prefix}/" 2>/dev/null | while read -r line; do
-        local backup_date
-        local backup_file
-        backup_date=$(echo "$line" | awk '{print $1}')
-        backup_file=$(echo "$line" | awk '{print $4}')
+    # Get list of all backup files from S3
+    local backup_list
+    backup_list=$(aws s3 ls "s3://${BACKUP_S3_BUCKET}/${s3_prefix}/" 2>/dev/null | grep -E '\.tar\.gz(\.gpg)?$' | awk '{print $4}' | sort -r)
 
-        if [ -z "$backup_file" ]; then
-            continue
-        fi
+    if [ -z "$backup_list" ]; then
+        log_debug "No S3 backups found"
+        return 0
+    fi
 
-        # Convert backup date to timestamp (BusyBox compatible)
-        local file_timestamp
-        file_timestamp=$(date -D "%Y-%m-%d" -d "$backup_date" +%s 2>/dev/null || echo "0")
+    # Get list of backups to keep
+    local keep_list
+    keep_list=$(classify_backups_gfs "$backup_list")
 
-        if [ "$file_timestamp" != "0" ] && [ "$file_timestamp" -lt "$cutoff_date" ]; then
+    # Convert keep list to associative array for fast lookup
+    declare -A keep_set
+    while IFS= read -r file; do
+        [ -n "$file" ] && keep_set["$file"]=1
+    done <<<"$keep_list"
+
+    # Delete backups not in keep list
+    local deleted_count=0
+    local kept_count=0
+
+    while IFS= read -r backup_file; do
+        [ -z "$backup_file" ] && continue
+
+        if [ -z "${keep_set[$backup_file]:-}" ]; then
             log_info "Deleting old S3 backup: $backup_file"
             aws s3 rm "s3://${BACKUP_S3_BUCKET}/${s3_prefix}/${backup_file}" || log_warn "Failed to delete $backup_file"
+            deleted_count=$((deleted_count + 1))
+        else
+            kept_count=$((kept_count + 1))
         fi
-    done
+    done <<<"$backup_list"
+
+    log_info "S3 retention: kept $kept_count backups, deleted $deleted_count backups"
 }
 
 # Delete old backups from configured destination(s)

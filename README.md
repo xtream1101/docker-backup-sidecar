@@ -567,14 +567,33 @@ BACKUP_SCHEDULE=*/15 * * * *
 # Just comment out or don't set BACKUP_SCHEDULE
 ```
 
-### Different Retention Periods
+### Retention Policy Configuration
+
+The backup sidecar uses a **Grandfather-Father-Son (GFS)** retention policy
+that keeps backups in multiple tiers for long-term storage.
+
+#### How GFS Retention Works
+
+Backups are automatically classified into five tiers:
+
+1. **Recent** - Keep the last N backups (quick recovery from recent issues)
+2. **Daily** - One backup per day for N days
+3. **Weekly** - One backup per week for N weeks  
+4. **Monthly** - One backup per month for N months
+5. **Yearly** - One backup per year for N years
+
+Each backup can belong to multiple tiers. For example, the most recent backup is
+counted in all applicable tiers, preventing excessive deletion.
+
+#### Default Configuration
 
 ```bash
-# Keep backups for 90 days
-BACKUP_RETENTION_DAYS=90
-
-# Keep backups for 7 days
-BACKUP_RETENTION_DAYS=7
+# Defaults if not set
+BACKUP_RETENTION_RECENT=14      # Keep the last N backups regardless of age
+BACKUP_RETENTION_DAILY=7        # Keep one backup per day for N days
+BACKUP_RETENTION_WEEKLY=4       # Keep one backup per week for N weeks
+BACKUP_RETENTION_MONTHLY=0      # Keep one backup per month for N months
+BACKUP_RETENTION_YEARLY=0       # Keep one backup per year for N years
 ```
 
 ### Debug Mode
@@ -612,14 +631,13 @@ This project includes comprehensive automated tests. See [TESTING.md](TESTING.md
 
 ```bash
 # Run all tests
-./test.sh
 just test
 
 # Quick smoke tests
 just test-quick
 
 # Try the example
-docker compose -f docker-compose.example.yml up -d
+just up
 just backup
 just list
 ```

@@ -6,7 +6,6 @@ Comprehensive automated testing for docker-backup-sidecar.
 
 ```bash
 # Run all tests
-./test.sh
 just test
 
 # Quick smoke tests
@@ -30,15 +29,16 @@ just test-env       # Environment setup
 ### Test Commands
 
 ```bash
-./test.sh all           # Run all tests
-./test.sh environment   # Test environment only
-./test.sh backup        # Test backup only
-./test.sh scripts       # Test scripts only
-./test.sh --keep-running # Start env without teardown
-
 just test              # Run all tests
 just test-quick        # Quick tests only
 just test-backup       # Backup tests only
+just test-env          # Environment tests only
+
+# Or run test script directly
+./tests/test.sh all           # Run all tests
+./tests/test.sh environment   # Test environment only
+./tests/test.sh backup        # Test backup only
+./tests/test.sh scripts       # Test scripts only
 ```
 
 ### Manual Operations
@@ -77,22 +77,23 @@ Failed:       0
 
 ## Test Environment
 
-Uses `docker-compose.example.yml` with:
+Uses `tests/docker-compose.example.yml` with:
 
 - PostgreSQL 16 with sample data
+- MongoDB 8 with sample data
 - Alpine app writing log files
-- Backup sidecar configured for both
+- Backup sidecar configured for all sources
 
 ## Adding Tests
 
-Add test function in `test.sh`:
+Add test function in `tests/test.sh`:
 
 ```bash
 test_my_feature() {
     log_info "Test Suite: My Feature"
     
     assert_success "Feature works" \
-        ${COMPOSE_CMD} exec backup /backup-scripts/my-script.sh
+        "${COMPOSE_CMD[@]}" exec backup /backup-scripts/my-script.sh
 }
 ```
 
@@ -111,7 +112,7 @@ wait_for "description" timeout command    # Wait with timeout
 ## Troubleshooting
 
 **Tests hang:** Check Docker is running, try `just clean`  
-**Permission errors:** `chmod +x test.sh init-test-postgres.sh`  
+**Permission errors:** `chmod +x tests/test.sh`  
 **Test failures:** Use `just up` and `just logs` to debug
 
 ## Manual Testing Required

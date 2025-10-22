@@ -66,7 +66,7 @@ backup_postgres() {
         # Select appropriate pg_dump client based on server version
         # Use the closest matching or next lower version for best compatibility
         # server_version_num format: 170000 for v17, 160000 for v16, 150000 for v15, etc.
-        local pg_dump_cmd="pg_dump16"  # Default fallback
+        local pg_dump_cmd="pg_dump16" # Default fallback
 
         if [ -n "$pg_version" ]; then
             if [ "$pg_version" -ge 170000 ]; then
@@ -124,7 +124,7 @@ backup_directories() {
         # Skip empty lines and comments
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
 
-        IFS=':' read -r path name <<< "$line"
+        IFS=':' read -r path name <<<"$line"
 
         # Trim whitespace
         path=$(echo "$path" | xargs)
@@ -151,7 +151,7 @@ backup_files() {
         # Skip empty lines and comments
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
 
-        IFS=':' read -r filepath name <<< "$line"
+        IFS=':' read -r filepath name <<<"$line"
 
         # Trim whitespace
         filepath=$(echo "$filepath" | xargs)

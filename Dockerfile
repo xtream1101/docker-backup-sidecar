@@ -1,22 +1,39 @@
+# Stage 1: Extract PostgreSQL client binaries
+FROM alpine:3 AS postgres-binaries
+
+# Install all PostgreSQL client versions
+RUN apk add --no-cache \
+    postgresql15-client \
+    postgresql16-client \
+    postgresql17-client
+
+# Stage 2: Final image
 FROM alpine:3
 
-# Install required tools
+# Install required tools (excluding PostgreSQL clients)
 RUN apk add --no-cache \
     bash \
     curl \
     gnupg \
     docker-cli \
     aws-cli \
-    postgresql15-client \
-    postgresql16-client \
-    postgresql17-client \
     mongodb-tools \
     sqlite \
     tar \
     gzip \
     dcron \
     findutils \
-    tzdata
+    tzdata \
+    # PostgreSQL dependencies needed to run the binaries
+    libpq \
+    lz4-libs \
+    zstd-libs \
+    && mkdir -p /backup-scripts /backups /var/log
+
+# Copy PostgreSQL binaries from the builder stage
+COPY --from=postgres-binaries /usr/libexec/postgresql15/ /usr/libexec/postgresql15/
+COPY --from=postgres-binaries /usr/libexec/postgresql16/ /usr/libexec/postgresql16/
+COPY --from=postgres-binaries /usr/libexec/postgresql17/ /usr/libexec/postgresql17/
 
 # Set up PostgreSQL client symlinks for all versions
 # By default, use pg16 clients (most compatible middle ground)
@@ -32,11 +49,6 @@ RUN ln -sf /usr/libexec/postgresql15/pg_dump /usr/local/bin/pg_dump15 && \
     ln -sf /usr/local/bin/pg_dump16 /usr/local/bin/pg_dump && \
     ln -sf /usr/local/bin/pg_restore16 /usr/local/bin/pg_restore && \
     ln -sf /usr/local/bin/psql16 /usr/local/bin/psql
-
-# Create scripts and backup directories
-RUN mkdir -p /backup-scripts /backups /var/log
-
-
 
 # Copy common scripts
 COPY scripts/* /backup-scripts/

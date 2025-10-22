@@ -16,12 +16,15 @@ TESTS_RUN=0
 TESTS_PASSED=0
 TESTS_FAILED=0
 
-# Docker Compose file to use
-COMPOSE_FILE="docker-compose.example.yml"
-COMPOSE_CMD="docker compose -f ${COMPOSE_FILE}"
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Test directories
-TEST_BACKUP_DIR="./test-backups"
+# Docker Compose file to use (relative to script location)
+COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.example.yml"
+COMPOSE_CMD=(docker compose -f "${COMPOSE_FILE}")
+
+# Test directories (relative to project root)
+TEST_BACKUP_DIR="${SCRIPT_DIR}/../test-backups"
 
 # ==============================================================================
 # Helper Functions
@@ -55,7 +58,7 @@ assert_success() {
 
     log_test "Testing: $description"
 
-    if "$@" > /dev/null 2>&1; then
+    if "$@" >/dev/null 2>&1; then
         log_success "$description"
         TESTS_PASSED=$((TESTS_PASSED + 1))
         return 0
@@ -74,7 +77,7 @@ assert_failure() {
 
     log_test "Testing: $description"
 
-    if ! "$@" > /dev/null 2>&1; then
+    if ! "$@" >/dev/null 2>&1; then
         log_success "$description"
         TESTS_PASSED=$((TESTS_PASSED + 1))
         return 0
@@ -133,7 +136,7 @@ wait_for() {
 
     log_info "Waiting for: $description (max ${max_wait}s)"
 
-    while ! "$@" > /dev/null 2>&1; do
+    while ! "$@" >/dev/null 2>&1; do
         if [ $waited -ge "$max_wait" ]; then
             log_error "Timeout waiting for: $description"
             return 1
@@ -154,12 +157,12 @@ setup() {
     log_info "Setting up test environment..."
 
     # Clean up any existing test environment
-    ${COMPOSE_CMD} down -v > /dev/null 2>&1 || true
+    "${COMPOSE_CMD[@]}" down -v >/dev/null 2>&1 || true
     rm -rf "${TEST_BACKUP_DIR}" || true
 
     # Start services
     log_info "Starting services..."
-    ${COMPOSE_CMD} up -d --build
+    "${COMPOSE_CMD[@]}" up -d --build
 
     # Wait for services to be healthy (using docker compose ps to check health status)
     log_info "Waiting for services to be healthy (max 60s)..."
@@ -167,8 +170,8 @@ setup() {
     while [ $waited -lt 60 ]; do
         local postgres_health
         local mongo_health
-        postgres_health=$(${COMPOSE_CMD} ps db --format json 2>/dev/null | grep -o '"Health":"[^"]*"' | cut -d'"' -f4 || echo "starting")
-        mongo_health=$(${COMPOSE_CMD} ps mongo --format json 2>/dev/null | grep -o '"Health":"[^"]*"' | cut -d'"' -f4 || echo "starting")
+        postgres_health=$("${COMPOSE_CMD[@]}" ps postgres --format json 2>/dev/null | grep -o '"Health":"[^"]*"' | cut -d'"' -f4 || echo "starting")
+        mongo_health=$("${COMPOSE_CMD[@]}" ps mongo --format json 2>/dev/null | grep -o '"Health":"[^"]*"' | cut -d'"' -f4 || echo "starting")
 
         if [ "$postgres_health" = "healthy" ] && [ "$mongo_health" = "healthy" ]; then
             log_success "All services are healthy (${waited}s)"
@@ -181,7 +184,7 @@ setup() {
 
     if [ $waited -ge 60 ]; then
         log_error "Services did not become healthy in time"
-        ${COMPOSE_CMD} ps
+        "${COMPOSE_CMD[@]}" ps
         return 1
     fi
 
@@ -199,7 +202,7 @@ setup() {
 
 teardown() {
     log_info "Tearing down test environment..."
-    ${COMPOSE_CMD} down -v > /dev/null 2>&1 || true
+    "${COMPOSE_CMD[@]}" down -v >/dev/null 2>&1 || true
     rm -rf "${TEST_BACKUP_DIR}" || true
     log_success "Cleanup complete"
 }
@@ -216,10 +219,10 @@ test_environment() {
 
     # Test that all containers are running
     local ps_output
-    ps_output=$(${COMPOSE_CMD} ps --format json 2>/dev/null || echo "[]")
+    ps_output=$("${COMPOSE_CMD[@]}" ps --format json 2>/dev/null || echo "[]")
 
     assert_contains "Database container is running" \
-        "$ps_output" "db"
+        "$ps_output" "postgres"
 
     assert_contains "App container is running" \
         "$ps_output" "app"
@@ -232,38 +235,38 @@ test_environment() {
 
     # Test database connectivity
     assert_success "Can connect to PostgreSQL database" \
-        "${COMPOSE_CMD}" exec -T db psql -U testuser -d testdb -c "SELECT 1"
+        "${COMPOSE_CMD[@]}" exec -T postgres psql -U testuser -d testdb -c "SELECT 1"
 
     # Test MongoDB connectivity
     assert_success "Can connect to MongoDB database" \
-        "${COMPOSE_CMD}" exec -T mongo mongosh --quiet --eval "db.adminCommand('ping')"
+        "${COMPOSE_CMD[@]}" exec -T mongo mongosh --quiet --eval "db.adminCommand('ping')"
 
     # Test that sample data exists
     local user_count
-    user_count=$(${COMPOSE_CMD} exec -T db psql -U testuser -d testdb -t -c "SELECT COUNT(*) FROM users;" 2>/dev/null | tr -d ' ')
+    user_count=$("${COMPOSE_CMD[@]}" exec -T postgres psql -U testuser -d testdb -t -c "SELECT COUNT(*) FROM users;" 2>/dev/null | tr -d ' ')
 
     assert_contains "Sample users exist in PostgreSQL database" \
         "$user_count" "3"
 
     # Test MongoDB sample data
     local mongo_user_count
-    mongo_user_count=$(${COMPOSE_CMD} exec -T mongo mongosh testdb -u testuser -p testpass123 --authenticationDatabase admin --quiet --eval "db.users.countDocuments()" 2>/dev/null | tail -1)
+    mongo_user_count=$("${COMPOSE_CMD[@]}" exec -T mongo mongosh testdb -u testuser -p testpass123 --authenticationDatabase admin --quiet --eval "db.users.countDocuments()" 2>/dev/null | tail -1)
 
     assert_contains "Sample users exist in MongoDB database" \
-        "$mongo_user_count" "3"    # Test that app is generating data
+        "$mongo_user_count" "3" # Test that app is generating data
     assert_success "App data directory exists" \
-        "${COMPOSE_CMD}" exec -T backup test -d /app/data
+        "${COMPOSE_CMD[@]}" exec -T backup test -d /app/data
 
     assert_success "App log file exists" \
-        "${COMPOSE_CMD}" exec -T backup test -f /app/data/app.log
+        "${COMPOSE_CMD[@]}" exec -T backup test -f /app/data/app.log
 
     # Test directly mounted file exists
     assert_success "Config file exists (directly mounted)" \
-        "${COMPOSE_CMD}" exec -T backup test -f /app/config.json
+        "${COMPOSE_CMD[@]}" exec -T backup test -f /app/config.json
 
     # Verify config file content
     local config_content
-    config_content=$(${COMPOSE_CMD} exec -T backup cat /app/config.json 2>/dev/null)
+    config_content=$("${COMPOSE_CMD[@]}" exec -T backup cat /app/config.json 2>/dev/null)
 
     assert_contains "Config file has correct content" \
         "$config_content" "settings"
@@ -277,12 +280,12 @@ test_backup() {
 
     # Test backup script exists and is executable
     assert_success "Backup script exists and is executable" \
-        "${COMPOSE_CMD}" exec -T backup test -x /backup-scripts/backup-now.sh
+        "${COMPOSE_CMD[@]}" exec -T backup test -x /backup-scripts/backup-now.sh
 
     # Run a backup
     log_info "Running backup (this may take a few seconds)..."
     local backup_output
-    backup_output=$(${COMPOSE_CMD} exec -T backup /backup-scripts/backup-now.sh 2>&1)
+    backup_output=$("${COMPOSE_CMD[@]}" exec -T backup /backup-scripts/backup-now.sh 2>&1)
 
     assert_contains "Backup completes successfully" \
         "$backup_output" "Backup completed successfully"
@@ -317,7 +320,7 @@ test_backup() {
 
     # Test list-backups script
     local list_output
-    list_output=$(${COMPOSE_CMD} exec -T backup /backup-scripts/list-backups.sh 2>&1)
+    list_output=$("${COMPOSE_CMD[@]}" exec -T backup /backup-scripts/list-backups.sh 2>&1)
 
     assert_contains "List backups shows backup file" \
         "$list_output" "tar.gz.gpg"
@@ -331,28 +334,28 @@ test_restore() {
 
     # First, create a backup
     log_info "Creating initial backup..."
-    ${COMPOSE_CMD} exec -T backup /backup-scripts/backup-now.sh > /dev/null 2>&1
+    "${COMPOSE_CMD[@]}" exec -T backup /backup-scripts/backup-now.sh >/dev/null 2>&1
 
     # Modify database data
     log_info "Modifying database data..."
-    ${COMPOSE_CMD} exec -T db psql -U testuser -d testdb -c "INSERT INTO users (username, email) VALUES ('testuser', 'test@example.com');" > /dev/null 2>&1
+    "${COMPOSE_CMD[@]}" exec -T postgres psql -U testuser -d testdb -c "INSERT INTO users (username, email) VALUES ('testuser', 'test@example.com');" >/dev/null 2>&1
 
     local users_before
-    users_before=$(${COMPOSE_CMD} exec -T db psql -U testuser -d testdb -t -c "SELECT COUNT(*) FROM users;" 2>/dev/null | tr -d ' ')
+    users_before=$("${COMPOSE_CMD[@]}" exec -T postgres psql -U testuser -d testdb -t -c "SELECT COUNT(*) FROM users;" 2>/dev/null | tr -d ' ')
 
     assert_contains "New user was added" \
         "$users_before" "4"
 
     # Test restore script exists
     assert_success "Restore script exists and is executable" \
-        "${COMPOSE_CMD}" exec -T backup test -x /backup-scripts/restore.sh
+        "${COMPOSE_CMD[@]}" exec -T backup test -x /backup-scripts/restore.sh
 
     # Note: Full restore test requires interactive input or modification
     # For automated testing, we verify the restore script can be invoked
     log_warn "Full restore test requires interactive input - verifying script only"
 
     assert_success "Restore script can be invoked" \
-        "${COMPOSE_CMD}" exec -T backup bash -c "echo | /backup-scripts/restore.sh 2>&1 | grep -q 'Available backups'"
+        "${COMPOSE_CMD[@]}" exec -T backup bash -c "echo | /backup-scripts/restore.sh 2>&1 | grep -q 'Available backups'"
 }
 
 test_files() {
@@ -363,11 +366,11 @@ test_files() {
 
     # Create a backup first
     log_info "Creating backup with file..."
-    ${COMPOSE_CMD} exec -T backup /backup-scripts/backup-now.sh > /dev/null 2>&1
+    "${COMPOSE_CMD[@]}" exec -T backup /backup-scripts/backup-now.sh >/dev/null 2>&1
 
     # Get the backup file name (just the basename)
     local backup_file
-    backup_file=$(${COMPOSE_CMD} exec -T backup bash -c "ls -t /backups-local/docker-backup-sidecar-test/*.tar.gz.gpg | head -1" 2>/dev/null | tr -d '\r')
+    backup_file=$("${COMPOSE_CMD[@]}" exec -T backup bash -c "ls -t /backups-local/docker-backup-sidecar-test/*.tar.gz.gpg | head -1" 2>/dev/null | tr -d '\r')
 
     if [ -z "$backup_file" ]; then
         log_error "No backup file found for file test"
@@ -381,7 +384,7 @@ test_files() {
 
     # Create temp directory and decrypt/extract inside container
     local verify_result
-    verify_result=$(${COMPOSE_CMD} exec -T backup bash -c "
+    verify_result=$("${COMPOSE_CMD[@]}" exec -T backup bash -c "
         mkdir -p '$temp_dir' &&
         gpg --decrypt --batch --yes --passphrase 'test-encryption-key-change-in-production' \
             --output '$temp_dir/backup.tar.gz' '$backup_file' 2>/dev/null &&
@@ -418,7 +421,7 @@ test_encryption() {
 
     # Create a backup
     log_info "Creating encrypted backup..."
-    ${COMPOSE_CMD} exec -T backup /backup-scripts/backup-now.sh > /dev/null 2>&1
+    "${COMPOSE_CMD[@]}" exec -T backup /backup-scripts/backup-now.sh >/dev/null 2>&1
 
     # Get the backup file
     local backup_file
@@ -458,8 +461,8 @@ test_retention() {
     # Create multiple backups
     log_info "Creating test backups..."
     for _ in 1 2 3; do
-        ${COMPOSE_CMD} exec -T backup /backup-scripts/backup-now.sh > /dev/null 2>&1
-        sleep 2  # Ensure different timestamps and allow backup to complete
+        "${COMPOSE_CMD[@]}" exec -T backup /backup-scripts/backup-now.sh >/dev/null 2>&1
+        sleep 2 # Ensure different timestamps and allow backup to complete
     done
 
     # Wait a bit more to ensure all backups are fully written
@@ -495,7 +498,7 @@ test_stop_services() {
 
     # Check that app container is currently running
     local app_status
-    app_status=$(${COMPOSE_CMD} ps app --format json 2>/dev/null | grep -c '"State":"running"' || echo "0")
+    app_status=$("${COMPOSE_CMD[@]}" ps app --format json 2>/dev/null | grep -c '"State":"running"' || echo "0")
 
     TESTS_RUN=$((TESTS_RUN + 1))
     if [ "$app_status" -eq 1 ]; then
@@ -511,31 +514,35 @@ test_stop_services() {
     log_info "Recreating backup container with BACKUP_STOP_SERVICES=app..."
 
     # Stop the current backup container
-    ${COMPOSE_CMD} stop backup > /dev/null 2>&1
+    "${COMPOSE_CMD[@]}" stop backup >/dev/null 2>&1
 
     # Start backup container with BACKUP_STOP_SERVICES env var
-    ${COMPOSE_CMD} run --rm -d \
+    "${COMPOSE_CMD[@]}" run --rm -d \
         --name backup-stop-test \
         -e BACKUP_NAME=docker-backup-sidecar-test \
         -e BACKUP_LOCAL_PATH=/backups-local \
         -e BACKUP_ENCRYPTION_KEY=test-encryption-key-change-in-production \
-        -e BACKUP_POSTGRES=postgresql://testuser:testpass123@db:5432/testdb \
+        -e BACKUP_POSTGRES=postgresql://testuser:testpass123@postgres:5432/testdb \
         -e BACKUP_MONGODB=mongodb://testuser:testpass123@mongo:27017/testdb?authSource=admin \
         -e BACKUP_DIRS=/app/data:app-data \
         -e BACKUP_FILES=/app/config.json:app-config \
         -e BACKUP_STOP_SERVICES=app \
         -e BACKUP_STOP_WAIT=3 \
         -e BACKUP_START_WAIT=3 \
-        -e BACKUP_RETENTION_DAYS=7 \
+        -e BACKUP_RETENTION_RECENT=14 \
+        -e BACKUP_RETENTION_DAILY=7 \
+        -e BACKUP_RETENTION_WEEKLY=4 \
+        -e BACKUP_RETENTION_MONTHLY=0 \
+        -e BACKUP_RETENTION_YEARLY=0 \
         -e TZ=America/New_York \
         backup \
-        sleep 300 > /dev/null 2>&1
+        sleep 300 >/dev/null 2>&1
 
     # Wait a moment for container to be ready
     sleep 2
 
     # Verify app is still running before backup
-    app_status=$(${COMPOSE_CMD} ps app --format json 2>/dev/null | grep -c '"State":"running"' || echo "0")
+    app_status=$("${COMPOSE_CMD[@]}" ps app --format json 2>/dev/null | grep -c '"State":"running"' || echo "0")
 
     TESTS_RUN=$((TESTS_RUN + 1))
     if [ "$app_status" -eq 1 ]; then
@@ -562,8 +569,8 @@ test_stop_services() {
         "$backup_output" "Backup completed successfully"
 
     # Verify app container is running again after backup
-    sleep 2  # Give it a moment to fully start
-    app_status=$(${COMPOSE_CMD} ps app --format json 2>/dev/null | grep -c '"State":"running"' || echo "0")
+    sleep 2 # Give it a moment to fully start
+    app_status=$("${COMPOSE_CMD[@]}" ps app --format json 2>/dev/null | grep -c '"State":"running"' || echo "0")
 
     TESTS_RUN=$((TESTS_RUN + 1))
     if [ "$app_status" -eq 1 ]; then
@@ -590,33 +597,33 @@ test_stop_services() {
     fi
 
     # Test with multiple services
-    log_info "Testing with multiple services (app,db)..."
-    backup_output=$(docker exec backup-stop-test sh -c 'BACKUP_STOP_SERVICES=app,db /backup-scripts/backup-now.sh' 2>&1)
+    log_info "Testing with multiple services (app,postgres)..."
+    backup_output=$(docker exec backup-stop-test sh -c 'BACKUP_STOP_SERVICES=app,postgres /backup-scripts/backup-now.sh' 2>&1)
 
     assert_contains "Multiple services stopped in backup output" \
-        "$backup_output" "Stopping services: app,db"
+        "$backup_output" "Stopping services: app,postgres"
 
     # Verify both containers are running after backup
     sleep 2
-    app_status=$(${COMPOSE_CMD} ps app --format json 2>/dev/null | grep -c '"State":"running"' || echo "0")
-    db_status=$(${COMPOSE_CMD} ps db --format json 2>/dev/null | grep -c '"State":"running"' || echo "0")
+    app_status=$("${COMPOSE_CMD[@]}" ps app --format json 2>/dev/null | grep -c '"State":"running"' || echo "0")
+    postgres_status=$("${COMPOSE_CMD[@]}" ps postgres --format json 2>/dev/null | grep -c '"State":"running"' || echo "0")
 
     TESTS_RUN=$((TESTS_RUN + 1))
-    if [ "$app_status" -eq 1 ] && [ "$db_status" -eq 1 ]; then
+    if [ "$app_status" -eq 1 ] && [ "$postgres_status" -eq 1 ]; then
         log_success "Multiple containers restarted successfully"
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
-        log_error "Not all containers restarted (app: $app_status, db: $db_status)"
+        log_error "Not all containers restarted (app: $app_status, postgres: $postgres_status)"
         TESTS_FAILED=$((TESTS_FAILED + 1))
     fi
 
     # Cleanup - stop and remove the test backup container
     log_info "Cleaning up test backup container..."
-    docker stop backup-stop-test > /dev/null 2>&1 || true
-    docker rm backup-stop-test > /dev/null 2>&1 || true
+    docker stop backup-stop-test >/dev/null 2>&1 || true
+    docker rm backup-stop-test >/dev/null 2>&1 || true
 
     # Restart the original backup container
-    ${COMPOSE_CMD} start backup > /dev/null 2>&1
+    "${COMPOSE_CMD[@]}" start backup >/dev/null 2>&1
     sleep 2
 }
 
@@ -631,30 +638,30 @@ test_scripts() {
 
     for script in "${scripts[@]}"; do
         assert_success "Script exists: $script" \
-            "${COMPOSE_CMD}" exec -T backup test -f "/backup-scripts/$script"
+            "${COMPOSE_CMD[@]}" exec -T backup test -f "/backup-scripts/$script"
 
         if [[ "$script" != "common.sh" ]]; then
             assert_success "Script is executable: $script" \
-                "${COMPOSE_CMD}" exec -T backup test -x "/backup-scripts/$script"
+                "${COMPOSE_CMD[@]}" exec -T backup test -x "/backup-scripts/$script"
         fi
     done
 
     # Test environment variables are set
     # shellcheck disable=SC2016  # Variables should expand in container, not host
     assert_success "BACKUP_NAME is set" \
-        "${COMPOSE_CMD}" exec -T backup bash -c '[ -n "$BACKUP_NAME" ]'
+        "${COMPOSE_CMD[@]}" exec -T backup bash -c '[ -n "$BACKUP_NAME" ]'
 
     # shellcheck disable=SC2016  # Variables should expand in container, not host
     assert_success "BACKUP_ENCRYPTION_KEY is set" \
-        "${COMPOSE_CMD}" exec -T backup bash -c '[ -n "$BACKUP_ENCRYPTION_KEY" ]'
+        "${COMPOSE_CMD[@]}" exec -T backup bash -c '[ -n "$BACKUP_ENCRYPTION_KEY" ]'
 
     # shellcheck disable=SC2016  # Variables should expand in container, not host
     assert_success "BACKUP_POSTGRES is set" \
-        "${COMPOSE_CMD}" exec -T backup bash -c '[ -n "$BACKUP_POSTGRES" ]'
+        "${COMPOSE_CMD[@]}" exec -T backup bash -c '[ -n "$BACKUP_POSTGRES" ]'
 
     # shellcheck disable=SC2016  # Variables should expand in container, not host
     assert_success "BACKUP_MONGODB is set" \
-        "${COMPOSE_CMD}" exec -T backup bash -c '[ -n "$BACKUP_MONGODB" ]'
+        "${COMPOSE_CMD[@]}" exec -T backup bash -c '[ -n "$BACKUP_MONGODB" ]'
 }
 
 # ==============================================================================
@@ -749,7 +756,7 @@ main() {
             log_success "Environment is ready. Run 'docker compose -f ${COMPOSE_FILE} down -v' to clean up."
             exit 0
             ;;
-        --help|-h)
+        --help | -h)
             echo "Usage: $0 [test-suite]"
             echo ""
             echo "Test Suites:"

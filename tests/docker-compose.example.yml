@@ -2,26 +2,26 @@
 # This is a complete, runnable example you can test locally
 #
 # Quick Start:
-# 1. Run: docker compose -f docker-compose.example.yml up -d
+# 1. Run: just up (or docker compose -f tests/docker-compose.example.yml up -d)
 # 2. Wait for services to start (~10 seconds)
-# 3. Run manual backup: docker compose -f docker-compose.example.yml exec backup /backup-scripts/backup-now.sh
-# 4. Check backups: docker compose -f docker-compose.example.yml exec backup /backup-scripts/list-backups.sh
+# 3. Run manual backup: just backup
+# 4. Check backups: just list
 # 5. View backup files: ls -lh test-backups/
 #
 # All configuration is inline - no .env file needed for testing!
-# For automated testing: `./test.sh` or `just test` (see TESTING.md)
+# For automated testing: `just test` (see TESTING.md)
 
 services:
   # PostgreSQL database with sample data
-  db:
+  postgres:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: testuser
       POSTGRES_PASSWORD: testpass123
       POSTGRES_DB: testdb
     volumes:
-      - db-data:/var/lib/postgresql/data
-      - ./init-test-postgres.sh:/docker-entrypoint-initdb.d/init-test-postgres.sh:ro
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-test-postgres.sql:/docker-entrypoint-initdb.d/init-test-postgres.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U testuser -d testdb"]
       interval: 5s
@@ -65,7 +65,7 @@ services:
                sleep 30;
              done'
     depends_on:
-      db:
+      postgres:
         condition: service_healthy
       mongo:
         condition: service_healthy
@@ -73,7 +73,7 @@ services:
   # Backup sidecar
   backup:
     build:
-      context: .
+      context: ..
       dockerfile: Dockerfile
     environment:
       # Backup name (REQUIRED) - identifies your backups
@@ -83,15 +83,19 @@ services:
       # Encryption key (CHANGE THIS IN PRODUCTION!)
       BACKUP_ENCRYPTION_KEY: test-encryption-key-change-in-production
       # PostgreSQL connection
-      BACKUP_POSTGRES: postgresql://testuser:testpass123@db:5432/testdb
+      BACKUP_POSTGRES: postgresql://testuser:testpass123@postgres:5432/testdb
       # MongoDB connection
       BACKUP_MONGODB: mongodb://testuser:testpass123@mongo:27017/testdb?authSource=admin
       # Directories to backup
       BACKUP_DIRS: /app/data:app-data
       # Individual files to backup (including directly mounted files)
       BACKUP_FILES: /app/config.json:app-config
-      # Retention policy
-      BACKUP_RETENTION_DAYS: 7
+      # GFS Retention policy (defaults: last 14 backups + 7 daily + 4 weekly)
+      BACKUP_RETENTION_RECENT: 14
+      BACKUP_RETENTION_DAILY: 7
+      BACKUP_RETENTION_WEEKLY: 4
+      BACKUP_RETENTION_MONTHLY: 0
+      BACKUP_RETENTION_YEARLY: 0
       # Timezone
       TZ: America/New_York
       # Schedule (comment out for manual testing mode)
@@ -106,7 +110,7 @@ services:
       # Local backup storage
       - ./test-backups:/backups-local
     depends_on:
-      db:
+      postgres:
         condition: service_healthy
       mongo:
         condition: service_healthy
@@ -119,5 +123,5 @@ services:
 
 volumes:
   app-data:
-  db-data:
+  postgres-data:
   mongo-data:

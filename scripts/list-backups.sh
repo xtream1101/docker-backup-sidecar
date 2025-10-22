@@ -55,7 +55,7 @@ list_s3_backups() {
     log_info "S3 backups in: $s3_path"
     echo ""
 
-    aws s3 ls "$s3_path" 2>/dev/null | grep -E '\.tar\.gz(\.gpg)?$' | sort -r || {
+    aws s3 ls "$s3_path" --human-readable 2>/dev/null | grep -E '\.tar\.gz(\.gpg)?$' | sort -r || {
         log_warn "No S3 backups found"
     }
 }

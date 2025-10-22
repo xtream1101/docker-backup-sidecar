@@ -22,7 +22,7 @@ jobs:
 
       - name: Run shellcheck
         run: |
-          shellcheck scripts/*.sh test.sh init-test-postgres.sh || echo "Shellcheck warnings found - please review"
+          shellcheck scripts/*.sh test.sh || echo "Shellcheck warnings found - please review"
         continue-on-error: true
 
   build-container:
