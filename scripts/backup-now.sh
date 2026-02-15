@@ -139,8 +139,7 @@ fi
 if [ -n "${BACKUP_DIRS:-}" ]; then
     while IFS= read -r line; do
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
-        IFS=':' read -r path name <<<"$line"
-        path=$(echo "$path" | xargs)
+        path=$(echo "$line" | xargs)
         if [ -d "$path" ]; then
             log_debug "Adding directory to backup: $path"
             BACKUP_PATHS+=("$path")

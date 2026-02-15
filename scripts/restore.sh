@@ -64,8 +64,7 @@ check_readonly_paths() {
     if [ -n "${BACKUP_DIRS:-}" ]; then
         while IFS= read -r line; do
             [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
-            IFS=':' read -r path name <<<"$line"
-            path=$(echo "$path" | xargs)
+            path=$(echo "$line" | xargs)
             if [ -d "$path" ] && is_path_readonly "$path"; then
                 log_warn "READ-ONLY: $path (from BACKUP_DIRS) - restore will fail for this directory"
                 ro_count=$((ro_count + 1))
@@ -228,8 +227,7 @@ restore_directories() {
     echo "$config" | tr ',' '\n' | while IFS= read -r line; do
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
 
-        IFS=':' read -r path name <<<"$line"
-        path=$(echo "$path" | xargs)
+        path=$(echo "$line" | xargs)
 
         # In the restore tree, restic preserves the full path
         local restored_path="${RESTORE_DIR}${path}"

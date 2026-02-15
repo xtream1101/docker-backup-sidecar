@@ -98,7 +98,7 @@ services:
       # Where Redis data is mounted in this container
       BACKUP_REDIS_DATA_DIR: /redis-data
       # Directories to backup
-      BACKUP_DIRS: /app/data:app-data
+      BACKUP_DIRS: /app/data
       # Individual files to backup
       BACKUP_FILES: /app/config.json:app-config
       # Retention policy

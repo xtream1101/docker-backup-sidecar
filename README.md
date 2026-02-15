@@ -93,7 +93,7 @@ RESTIC_PASSWORD=your-very-strong-passphrase-here
 
 # What to backup
 BACKUP_POSTGRES=postgresql://postgres:yourpassword@db:5432/myapp
-BACKUP_DIRS=/data:app-data
+BACKUP_DIRS=/data
 
 # Schedule (daily at 2 AM) - omit for manual mode
 BACKUP_SCHEDULE=0 2 * * *
@@ -278,16 +278,23 @@ BACKUP_STOP_WAIT=10
 Directories are backed up directly by restic for efficient deduplication:
 
 ```bash
-# Format: /path:name,/path2:name2
-BACKUP_DIRS=/data:app-data,/config:app-config,/uploads:user-uploads
+# Format: /path,/path2
+BACKUP_DIRS=/data,/config,/uploads
 ```
 
 #### Individual Files
+
+Files are copied to a staging area before backup. The name after the colon is used to
+identify files in the backup and is required for restore to work correctly.
 
 ```bash
 # Format: /path/file:name,/path2/file2:name2
 BACKUP_FILES=/config/app.json:config,/secrets/api-key:apikey
 ```
+
+For example, with `BACKUP_FILES=/app/config.json:app-config`, the file is stored in the
+backup as `staging/files/app-config`. During restore, it is looked up by this name and
+copied back to `/app/config.json`.
 
 ### Container Management
 
@@ -411,7 +418,7 @@ volumes:
 RESTIC_REPOSITORY=/backups-local/myapp
 RESTIC_PASSWORD=strong-passphrase-here
 BACKUP_POSTGRES=postgresql://postgres:${DB_PASSWORD}@db:5432/myapp
-BACKUP_DIRS=/app/uploads:uploads
+BACKUP_DIRS=/app/uploads
 ```
 
 ### Scenario 2: App with SQLite Database
@@ -443,7 +450,7 @@ services:
 RESTIC_REPOSITORY=/backups-local/mywebapp
 RESTIC_PASSWORD=strong-passphrase-here
 BACKUP_FILES=/app/data/app.db:database
-BACKUP_DIRS=/app/data/uploads:uploads
+BACKUP_DIRS=/app/data/uploads
 ```
 
 Note: SQLite databases should be backed up using `BACKUP_FILES` with the container stopped via `BACKUP_STOP_SERVICES`.
@@ -463,7 +470,7 @@ BACKUP_POSTGRES=postgresql://postgres:${PG_PASSWORD}@postgres:5432/maindb
 BACKUP_MONGODB=mongodb://root:${MONGO_PASSWORD}@mongo:27017/?authSource=admin
 
 # Files
-BACKUP_DIRS=/config:config,/uploads:uploads
+BACKUP_DIRS=/config,/uploads
 BACKUP_FILES=/secrets/api-key.txt:apikey
 
 # Monitoring

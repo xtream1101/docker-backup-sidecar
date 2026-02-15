@@ -504,7 +504,7 @@ test_stop_services() {
         -e BACKUP_MONGODB=mongodb://testuser:testpass123@mongo:27017/testdb?authSource=admin \
         -e BACKUP_REDIS=redis://redis:6379 \
         -e BACKUP_REDIS_DATA_DIR=/redis-data \
-        -e BACKUP_DIRS=/app/data:app-data \
+        -e BACKUP_DIRS=/app/data \
         -e BACKUP_FILES=/app/config.json:app-config \
         -e BACKUP_STOP_SERVICES=app \
         -e BACKUP_STOP_WAIT=3 \
