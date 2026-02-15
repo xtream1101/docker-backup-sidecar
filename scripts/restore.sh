@@ -183,7 +183,7 @@ restore_postgres() {
             # Only fail if it's not just "errors ignored on restore"
             if echo "$restore_output" | grep -q "errors ignored on restore"; then
                 local ignored_count
-                ignored_count=$(echo "$restore_output" | grep -oP 'errors ignored on restore: \K[0-9]+' || echo "some")
+                ignored_count=$(echo "$restore_output" | grep -o 'errors ignored on restore: [0-9]*' | grep -o '[0-9]*$' || echo "some")
                 log_info "PostgreSQL restore for $database completed ($ignored_count non-fatal warnings ignored)"
                 log_debug "pg_restore warnings for $database:"
                 echo "$restore_output" | grep -E "^pg_restore" | while IFS= read -r warn_line; do log_debug "  $warn_line"; done
