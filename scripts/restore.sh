@@ -8,50 +8,42 @@ set -euo pipefail
 source /backup-scripts/common.sh
 
 # Service configuration
-BACKUP_DIR="/backups"
 BACKUP_NAME=$(get_backup_name) || {
     log_error "Could not determine backup name"
     exit 1
 }
 
-# Check for backup timestamp argument
+# Check for snapshot ID argument
 if [ $# -eq 0 ]; then
-    log_error "Usage: $0 <backup-timestamp>"
-    log_info "Available backups:"
-    /backup-scripts/list-backups.sh
+    log_error "Usage: $0 <snapshot-id>"
+    log_info "Use 'latest' to restore the most recent snapshot"
+    log_info ""
+    log_info "Available snapshots:"
+    validate_restic_config
+    restic_snapshots
     exit 1
 fi
 
-BACKUP_TIMESTAMP="$1"
-BACKUP_FILENAME="${BACKUP_NAME}-${BACKUP_TIMESTAMP}.tar.gz.gpg"
+SNAPSHOT_ID="$1"
 
-log_info "Starting restore for ${BACKUP_NAME} from backup: ${BACKUP_TIMESTAMP}"
+log_info "Starting restore for ${BACKUP_NAME} from snapshot: ${SNAPSHOT_ID}"
 
-# Validate backup configuration
-validate_backup_config
+# Validate restic configuration
+validate_restic_config
 
 # Create temporary restore directory
-TEMP_DIR="${BACKUP_DIR}/restore-${BACKUP_TIMESTAMP}"
-mkdir -p "$TEMP_DIR"
+RESTORE_DIR="/backups/restore-$$"
+mkdir -p "$RESTORE_DIR"
 
 # Cleanup function
 cleanup() {
     log_info "Cleaning up temporary files..."
-    rm -rf "$TEMP_DIR"
+    rm -rf "$RESTORE_DIR"
 }
 trap cleanup EXIT
 
-# Load backup from configured source
-BACKUP_KEY="${BACKUP_NAME}/${BACKUP_FILENAME}"
-ENCRYPTED_FILE="${TEMP_DIR}/${BACKUP_FILENAME}"
-load_backup "$BACKUP_KEY" "$ENCRYPTED_FILE"
-
-# Decrypt backup
-BACKUP_FILE=$(decrypt_file "$ENCRYPTED_FILE")
-
-# Extract backup archive
-log_info "Extracting backup archive..."
-tar -xzf "$BACKUP_FILE" -C "$TEMP_DIR" || send_failure "Archive extraction failed"
+# Restore snapshot
+restic_restore "$SNAPSHOT_ID" "$RESTORE_DIR"
 
 # Confirm restore operation
 log_warn "WARNING: This will overwrite existing data!"
@@ -60,14 +52,7 @@ sleep 10
 
 # Stop services
 log_info "Stopping services..."
-cd "/services/${BACKUP_NAME}" 2>/dev/null || cd "$(dirname "$(find /services -name docker-compose.yml -path "*/${BACKUP_NAME}/*" | head -1)")" 2>/dev/null || {
-    log_warn "Could not find service directory, attempting restore anyway..."
-}
-
-# Stop all containers in the service
-if [ -f "docker-compose.yml" ]; then
-    docker compose stop || log_warn "Failed to stop some services"
-fi
+stop_services
 
 #
 # RESTORE FUNCTIONS
@@ -77,65 +62,53 @@ fi
 restore_postgres() {
     local config="$1"
 
-    # Skip if empty
     [ -z "$config" ] && return 0
 
-    # Parse each line: postgresql://user:password@host:port/database
     echo "$config" | while IFS= read -r line; do
-        # Skip empty lines and comments
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
 
         local uri="$line"
 
-        # Extract database name from URI for logging and filename
         local database
         database=$(echo "$uri" | sed -n 's#.*://[^/]*/\([^?]*\).*#\1#p')
         [ -z "$database" ] && database="postgres"
 
-        local dump_file="${TEMP_DIR}/postgres-${database}.dump"
+        # Find the dump file in the restore tree
+        local dump_file
+        dump_file=$(find "$RESTORE_DIR" -name "postgres-${database}.dump" -type f | head -1)
 
-        if [ ! -f "$dump_file" ]; then
+        if [ -z "$dump_file" ]; then
             log_warn "PostgreSQL dump not found for $database, skipping"
             continue
         fi
 
         log_info "Restoring PostgreSQL database: $database"
 
-        # Start database container if needed
-        if [ -f "docker-compose.yml" ]; then
-            docker compose start db 2>/dev/null || true
-            sleep 5
-        fi
-
         # Check PostgreSQL server version
         local pg_version
-        pg_version=$(psql16 "$uri" \
+        pg_version=$(psql17 "$uri" \
             --tuples-only \
             --no-align \
             --command="SHOW server_version_num;" 2>/dev/null | head -1)
 
-        # Select appropriate pg_restore client based on server version
-        # Use the closest matching or next lower version for best compatibility
-        # server_version_num format: 170000 for v17, 160000 for v16, 150000 for v15, etc.
-        local pg_restore_cmd="pg_restore16" # Default fallback
+        local pg_restore_cmd="pg_restore17"
 
         if [ -n "$pg_version" ]; then
-            if [ "$pg_version" -ge 170000 ]; then
-                log_debug "PostgreSQL server version $pg_version detected (>= 17), using pg_restore17 client"
+            if [ "$pg_version" -ge 180000 ]; then
+                log_debug "PostgreSQL server >= 18, using pg_restore18"
+                pg_restore_cmd="pg_restore18"
+            elif [ "$pg_version" -ge 170000 ]; then
+                log_debug "PostgreSQL server 17.x, using pg_restore17"
                 pg_restore_cmd="pg_restore17"
             elif [ "$pg_version" -ge 160000 ]; then
-                log_debug "PostgreSQL server version $pg_version detected (16.x), using pg_restore16 client"
+                log_debug "PostgreSQL server 16.x, using pg_restore16"
                 pg_restore_cmd="pg_restore16"
-            elif [ "$pg_version" -ge 150000 ]; then
-                log_debug "PostgreSQL server version $pg_version detected (15.x), using pg_restore15 client"
-                pg_restore_cmd="pg_restore15"
             else
-                log_debug "PostgreSQL server version $pg_version detected (< 15), using pg_restore15 client for best compatibility"
-                pg_restore_cmd="pg_restore15"
+                log_debug "PostgreSQL server < 16, using pg_restore16"
+                pg_restore_cmd="pg_restore16"
             fi
         fi
 
-        # Restore using version-matched client and connection URI
         "$pg_restore_cmd" \
             --dbname="$uri" \
             --clean \
@@ -148,68 +121,52 @@ restore_postgres() {
 restore_mongodb() {
     local config="$1"
 
-    # Skip if empty
     [ -z "$config" ] && return 0
 
-    # Parse each line: mongodb://user:password@host:port/database?authSource=admin
     echo "$config" | while IFS= read -r line; do
-        # Skip empty lines and comments
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
 
         local uri="$line"
 
-        local dump_dir="${TEMP_DIR}/mongodb-dump"
+        local dump_dir
+        dump_dir=$(find "$RESTORE_DIR" -type d -name "mongodb-dump" | head -1)
 
-        if [ ! -d "$dump_dir" ]; then
+        if [ -z "$dump_dir" ]; then
             log_warn "MongoDB dump directory not found, skipping"
             continue
         fi
 
         log_info "Restoring MongoDB database"
-
-        # Start database container if needed
-        if [ -f "docker-compose.yml" ]; then
-            docker compose start mongo 2>/dev/null || true
-            sleep 5
-        fi
-
-        # Use mongorestore with --uri flag for direct URI support
         mongorestore --uri="$uri" --drop "$dump_dir" || send_failure "MongoDB restore failed"
     done
 }
 
-# Restore directories from tar
+# Restore directories
 restore_directories() {
     local config="$1"
 
-    # Skip if empty
     [ -z "$config" ] && return 0
 
-    # Parse comma-separated list: /path:name,/path2:name2
     echo "$config" | tr ',' '\n' | while IFS= read -r line; do
-        # Skip empty lines and comments
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
 
         IFS=':' read -r path name <<<"$line"
-
-        # Trim whitespace
         path=$(echo "$path" | xargs)
-        name=$(echo "$name" | xargs)
 
-        local tar_file="${TEMP_DIR}/${name}.tar.gz"
+        # In the restore tree, restic preserves the full path
+        local restored_path="${RESTORE_DIR}${path}"
 
-        if [ ! -f "$tar_file" ]; then
-            log_warn "Tar file not found for $name, skipping: $tar_file"
+        if [ ! -d "$restored_path" ]; then
+            log_warn "Restored directory not found for $path, skipping"
             continue
         fi
 
-        log_info "Restoring directory: $path from $name"
+        log_info "Restoring directory: $path"
 
-        # Create parent directory if needed
-        mkdir -p "$(dirname "$path")"
-
-        # Extract tar archive
-        tar -xzf "$tar_file" -C "$(dirname "$path")" || send_failure "Directory restore failed for $path"
+        mkdir -p "$path"
+        # Use rsync-like copy: delete destination contents and replace with backup
+        rm -rf "${path:?}/"*
+        cp -a "$restored_path/." "$path/" || send_failure "Directory restore failed for $path"
     done
 }
 
@@ -217,34 +174,28 @@ restore_directories() {
 restore_files() {
     local config="$1"
 
-    # Skip if empty
     [ -z "$config" ] && return 0
 
-    # Parse comma-separated list: /path/file:name,/path2/file2:name2
     echo "$config" | tr ',' '\n' | while IFS= read -r line; do
-        # Skip empty lines and comments
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
 
         IFS=':' read -r filepath name <<<"$line"
-
-        # Trim whitespace
         filepath=$(echo "$filepath" | xargs)
         name=$(echo "$name" | xargs)
 
-        local backup_file="${TEMP_DIR}/${name}"
+        # Files are stored in staging/files/{name}
+        local restored_file
+        restored_file=$(find "$RESTORE_DIR" -path "*/staging/files/${name}" -type f | head -1)
 
-        if [ ! -f "$backup_file" ]; then
+        if [ -z "$restored_file" ]; then
             log_warn "Backup file not found for $name, skipping"
             continue
         fi
 
         log_info "Restoring file: $filepath from $name"
 
-        # Create parent directory if needed
         mkdir -p "$(dirname "$filepath")"
-
-        # Copy file
-        cp "$backup_file" "$filepath" || send_failure "File restore failed for $filepath"
+        cp "$restored_file" "$filepath" || send_failure "File restore failed for $filepath"
     done
 }
 
@@ -264,6 +215,14 @@ if [ -n "${BACKUP_MONGODB:-}" ]; then
     restore_mongodb "$BACKUP_MONGODB"
 fi
 
+# Redis restores
+if [ -n "${BACKUP_REDIS:-}" ]; then
+    redis_db_dir=$(find "$RESTORE_DIR" -path "*/staging/databases" -type d | head -1)
+    if [ -n "$redis_db_dir" ]; then
+        restore_redis "$BACKUP_REDIS" "$redis_db_dir"
+    fi
+fi
+
 # Directory restores
 if [ -n "${BACKUP_DIRS:-}" ]; then
     restore_directories "$BACKUP_DIRS"
@@ -274,11 +233,8 @@ if [ -n "${BACKUP_FILES:-}" ]; then
     restore_files "$BACKUP_FILES"
 fi
 
-# Start all services
-log_info "Starting all services..."
-if [ -f "docker-compose.yml" ]; then
-    docker compose up -d || send_failure "Failed to start services"
-fi
+# Start services
+start_services
 
 log_info "Restore completed successfully!"
 log_info "Please verify the application is working correctly"

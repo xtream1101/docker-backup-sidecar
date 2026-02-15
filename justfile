@@ -30,13 +30,17 @@ test-env:
 test-files:
     ./tests/test.sh files
 
-# Test encryption functionality
-test-encryption:
-    ./tests/test.sh encryption
+# Test Redis backup functionality
+test-redis:
+    ./tests/test.sh redis
 
 # Test container stop/start during backup
 test-stop-services:
     ./tests/test.sh stop-services
+
+# Test retention policy
+test-retention:
+    ./tests/test.sh retention
 
 # === Development ===
 
@@ -71,7 +75,7 @@ clean:
 backup:
     docker compose -f tests/docker-compose.example.yml exec backup /backup-scripts/backup-now.sh
 
-# List all available backups
+# List all available snapshots
 list:
     docker compose -f tests/docker-compose.example.yml exec backup /backup-scripts/list-backups.sh
 

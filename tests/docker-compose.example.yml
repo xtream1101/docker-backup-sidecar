@@ -1,12 +1,10 @@
-# Working Test Example: PostgreSQL + MongoDB with Sample Data
-# This is a complete, runnable example you can test locally
+# Working Test Example: PostgreSQL + MongoDB + Redis with Sample Data
 #
 # Quick Start:
 # 1. Run: just up (or docker compose -f tests/docker-compose.example.yml up -d)
 # 2. Wait for services to start (~10 seconds)
 # 3. Run manual backup: just backup
 # 4. Check backups: just list
-# 5. View backup files: ls -lh test-backups/
 #
 # All configuration is inline - no .env file needed for testing!
 # For automated testing: `just test` (see TESTING.md)
@@ -27,8 +25,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
-    # ports:
-    #   - "5432:5432"
 
   # MongoDB database with sample data
   mongo:
@@ -45,15 +41,24 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
-    # ports:
-    #   - "27017:27017"
+
+  # Redis with persistent data
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis-data:/data
+    command: redis-server --save 60 1 --loglevel warning
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
   # Sample app that writes to a data directory
   app:
     image: alpine:3
     volumes:
       - app-data:/app/data
-      # Direct file mount (not a volume/directory)
       - ./test-config.json:/app/config.json:ro
     command: >
       sh -c 'mkdir -p /app/data &&
@@ -69,6 +74,8 @@ services:
         condition: service_healthy
       mongo:
         condition: service_healthy
+      redis:
+        condition: service_healthy
 
   # Backup sidecar
   backup:
@@ -76,52 +83,55 @@ services:
       context: ..
       dockerfile: Dockerfile
     environment:
-      # Backup name (REQUIRED) - identifies your backups
+      # Backup name (REQUIRED)
       BACKUP_NAME: docker-backup-sidecar-test
-      # Local backup path (must match volume mount)
-      BACKUP_LOCAL_PATH: /backups-local
-      # Encryption key (CHANGE THIS IN PRODUCTION!)
-      BACKUP_ENCRYPTION_KEY: test-encryption-key-change-in-production
+      # Restic repository (local for testing)
+      RESTIC_REPOSITORY: /backups-local/docker-backup-sidecar-test
+      # Restic password
+      RESTIC_PASSWORD: test-restic-password-change-in-production
       # PostgreSQL connection
       BACKUP_POSTGRES: postgresql://testuser:testpass123@postgres:5432/testdb
       # MongoDB connection
       BACKUP_MONGODB: mongodb://testuser:testpass123@mongo:27017/testdb?authSource=admin
+      # Redis connection
+      BACKUP_REDIS: redis://redis:6379
+      # Where Redis data is mounted in this container
+      BACKUP_REDIS_DATA_DIR: /redis-data
       # Directories to backup
       BACKUP_DIRS: /app/data:app-data
-      # Individual files to backup (including directly mounted files)
+      # Individual files to backup
       BACKUP_FILES: /app/config.json:app-config
-      # GFS Retention policy (defaults: last 14 backups + 7 daily + 4 weekly)
-      BACKUP_RETENTION_RECENT: 14
-      BACKUP_RETENTION_DAILY: 7
-      BACKUP_RETENTION_WEEKLY: 4
-      BACKUP_RETENTION_MONTHLY: 0
-      BACKUP_RETENTION_YEARLY: 0
+      # Retention policy
+      RESTIC_KEEP_LAST: 14
+      RESTIC_KEEP_DAILY: 7
+      RESTIC_KEEP_WEEKLY: 4
+      RESTIC_KEEP_MONTHLY: 0
+      RESTIC_KEEP_YEARLY: 0
       # Timezone
       TZ: America/New_York
-      # Schedule (comment out for manual testing mode)
-      # BACKUP_SCHEDULE: "*/2 * * * *"
     volumes:
       # Docker socket for container management
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      # App data to backup (read-only), remove ":ro" to allow a restore
+      # App data to backup (read-only)
       - app-data:/app/data:ro
       # Directly mounted file to backup (read-only)
       - ./test-config.json:/app/config.json:ro
-      # Local backup storage
+      # Redis data directory (read-only for backup, restic needs to read the RDB)
+      - redis-data:/redis-data:ro
+      # Local backup storage (restic repo lives here)
       - ./test-backups:/backups-local
     depends_on:
       postgres:
         condition: service_healthy
       mongo:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       app:
         condition: service_started
-    # No command needed! Entrypoint handles everything:
-    # - If BACKUP_SCHEDULE is set, runs cron automatically
-    # - If BACKUP_SCHEDULE is not set, runs in manual mode
-    # To enable scheduled backups, uncomment BACKUP_SCHEDULE above
 
 volumes:
   app-data:
   postgres-data:
   mongo-data:
+  redis-data:

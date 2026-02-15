@@ -8,23 +8,24 @@ set -euo pipefail
 source /backup-scripts/common.sh
 
 # Service configuration
-BACKUP_DIR="/backups"
-TIMESTAMP=$(get_timestamp)
+STAGING_DIR="/backups/staging"
 BACKUP_NAME=$(get_backup_name) || send_failure "Could not determine backup name"
+TIMESTAMP=$(get_timestamp)
 
 log_info "Starting backup for ${BACKUP_NAME} at ${TIMESTAMP}"
 
-# Validate backup configuration
-validate_backup_config
+# Validate restic configuration and init repo
+validate_restic_config
+restic_init
 
-# Create temporary backup directory
-TEMP_DIR="${BACKUP_DIR}/${TIMESTAMP}"
-mkdir -p "$TEMP_DIR"
+# Create staging directory for database dumps
+rm -rf "$STAGING_DIR"
+mkdir -p "${STAGING_DIR}/databases"
 
 # Cleanup function
 cleanup() {
-    log_info "Cleaning up temporary files..."
-    rm -rf "$TEMP_DIR"
+    log_info "Cleaning up staging files..."
+    rm -rf "$STAGING_DIR"
 }
 trap cleanup EXIT
 
@@ -32,7 +33,7 @@ trap cleanup EXIT
 stop_services
 
 #
-# BACKUP FUNCTIONS
+# DATABASE DUMP FUNCTIONS
 #
 
 # Backup PostgreSQL databases
@@ -42,14 +43,11 @@ backup_postgres() {
     # Skip if empty
     [ -z "$config" ] && return 0
 
-    # Parse each line: postgresql://user:password@host:port/database
     echo "$config" | while IFS= read -r line; do
-        # Skip empty lines and comments
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
 
         local uri="$line"
 
-        # Extract database name from URI for logging and filename
         local database
         database=$(echo "$uri" | sed -n 's#.*://[^/]*/\([^?]*\).*#\1#p')
         [ -z "$database" ] && database="postgres"
@@ -58,36 +56,32 @@ backup_postgres() {
 
         # Check PostgreSQL server version
         local pg_version
-        pg_version=$(psql16 "$uri" \
+        pg_version=$(psql17 "$uri" \
             --tuples-only \
             --no-align \
             --command="SHOW server_version_num;" 2>/dev/null | head -1)
 
-        # Select appropriate pg_dump client based on server version
-        # Use the closest matching or next lower version for best compatibility
-        # server_version_num format: 170000 for v17, 160000 for v16, 150000 for v15, etc.
-        local pg_dump_cmd="pg_dump16" # Default fallback
+        local pg_dump_cmd="pg_dump17"
 
         if [ -n "$pg_version" ]; then
-            if [ "$pg_version" -ge 170000 ]; then
-                log_debug "PostgreSQL server version $pg_version detected (>= 17), using pg_dump17 client"
+            if [ "$pg_version" -ge 180000 ]; then
+                log_debug "PostgreSQL server >= 18, using pg_dump18"
+                pg_dump_cmd="pg_dump18"
+            elif [ "$pg_version" -ge 170000 ]; then
+                log_debug "PostgreSQL server 17.x, using pg_dump17"
                 pg_dump_cmd="pg_dump17"
             elif [ "$pg_version" -ge 160000 ]; then
-                log_debug "PostgreSQL server version $pg_version detected (16.x), using pg_dump16 client"
+                log_debug "PostgreSQL server 16.x, using pg_dump16"
                 pg_dump_cmd="pg_dump16"
-            elif [ "$pg_version" -ge 150000 ]; then
-                log_debug "PostgreSQL server version $pg_version detected (15.x), using pg_dump15 client"
-                pg_dump_cmd="pg_dump15"
             else
-                log_debug "PostgreSQL server version $pg_version detected (< 15), using pg_dump15 client for best compatibility"
-                pg_dump_cmd="pg_dump15"
+                log_debug "PostgreSQL server < 16, using pg_dump16"
+                pg_dump_cmd="pg_dump16"
             fi
         fi
 
-        # Create backup using version-matched client and connection URI
         "$pg_dump_cmd" "$uri" \
             --format=custom \
-            --file="${TEMP_DIR}/postgres-${database}.dump" || send_failure "PostgreSQL backup failed for $database"
+            --file="${STAGING_DIR}/databases/postgres-${database}.dump" || send_failure "PostgreSQL backup failed for $database"
     done
 }
 
@@ -98,71 +92,13 @@ backup_mongodb() {
     # Skip if empty
     [ -z "$config" ] && return 0
 
-    # Parse each line: mongodb://user:password@host:port/database?authSource=admin
     echo "$config" | while IFS= read -r line; do
-        # Skip empty lines and comments
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
 
         local uri="$line"
 
         log_info "Backing up MongoDB database"
-
-        # Use mongodump with --uri flag for direct URI support
-        mongodump --uri="$uri" --out="${TEMP_DIR}/mongodb-dump" || send_failure "MongoDB backup failed"
-    done
-}
-
-# Backup directories via tar
-backup_directories() {
-    local config="$1"
-
-    # Skip if empty
-    [ -z "$config" ] && return 0
-
-    # Parse comma-separated list: /path:name,/path2:name2
-    echo "$config" | tr ',' '\n' | while IFS= read -r line; do
-        # Skip empty lines and comments
-        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
-
-        IFS=':' read -r path name <<<"$line"
-
-        # Trim whitespace
-        path=$(echo "$path" | xargs)
-        name=$(echo "$name" | xargs)
-
-        if [ -d "$path" ]; then
-            log_info "Backing up directory: $path as $name"
-            tar -czf "${TEMP_DIR}/${name}.tar.gz" -C "$(dirname "$path")" "$(basename "$path")" || send_failure "Directory backup failed for $path"
-        else
-            log_warn "Directory not found, skipping: $path"
-        fi
-    done
-}
-
-# Backup individual files
-backup_files() {
-    local config="$1"
-
-    # Skip if empty
-    [ -z "$config" ] && return 0
-
-    # Parse comma-separated list: /path/file:name,/path2/file2:name2
-    echo "$config" | tr ',' '\n' | while IFS= read -r line; do
-        # Skip empty lines and comments
-        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
-
-        IFS=':' read -r filepath name <<<"$line"
-
-        # Trim whitespace
-        filepath=$(echo "$filepath" | xargs)
-        name=$(echo "$name" | xargs)
-
-        if [ -f "$filepath" ]; then
-            log_info "Backing up file: $filepath as $name"
-            cp "$filepath" "${TEMP_DIR}/${name}" || send_failure "File backup failed for $filepath"
-        else
-            log_warn "File not found, skipping: $filepath"
-        fi
+        mongodump --uri="$uri" --out="${STAGING_DIR}/databases/mongodb-dump" || send_failure "MongoDB backup failed"
     done
 }
 
@@ -172,55 +108,78 @@ backup_files() {
 
 log_info "Processing backup configuration..."
 
-# PostgreSQL backups
+# Database dumps
 if [ -n "${BACKUP_POSTGRES:-}" ]; then
     backup_postgres "$BACKUP_POSTGRES"
 fi
 
-# MongoDB backups
 if [ -n "${BACKUP_MONGODB:-}" ]; then
     backup_mongodb "$BACKUP_MONGODB"
 fi
 
-# Directory backups
-if [ -n "${BACKUP_DIRS:-}" ]; then
-    backup_directories "$BACKUP_DIRS"
-fi
-
-# File backups
-if [ -n "${BACKUP_FILES:-}" ]; then
-    backup_files "$BACKUP_FILES"
-fi
-
-# Check if we have anything to backup
-if [ -z "$(ls -A "$TEMP_DIR")" ]; then
-    send_failure "No backup data generated - check your backup configuration"
+if [ -n "${BACKUP_REDIS:-}" ]; then
+    dump_redis "$BACKUP_REDIS" "${STAGING_DIR}/databases"
 fi
 
 # Start services if they were stopped
 start_services
 
-# Create final backup archive
-log_info "Creating backup archive..."
-BACKUP_FILE="${BACKUP_DIR}/${BACKUP_NAME}-${TIMESTAMP}.tar.gz"
-tar -czf "$BACKUP_FILE" -C "$TEMP_DIR" . || send_failure "Archive creation failed"
+#
+# BUILD RESTIC BACKUP PATHS
+#
 
-# Encrypt backup
-log_info "Processing backup encryption..."
-ENCRYPTED_FILE=$(encrypt_file "$BACKUP_FILE")
+BACKUP_PATHS=()
 
-if [ -z "$ENCRYPTED_FILE" ]; then
-    send_failure "Encryption failed - no output from encrypt_file function"
+# Always include staging dir if it has content
+if [ -n "$(ls -A "${STAGING_DIR}/databases" 2>/dev/null)" ]; then
+    BACKUP_PATHS+=("${STAGING_DIR}/databases")
 fi
 
-log_info "Backup file ready: $(basename "$ENCRYPTED_FILE")"
+# Add directories from BACKUP_DIRS (using process substitution to avoid subshell)
+if [ -n "${BACKUP_DIRS:-}" ]; then
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        IFS=':' read -r path name <<<"$line"
+        path=$(echo "$path" | xargs)
+        if [ -d "$path" ]; then
+            log_debug "Adding directory to backup: $path"
+            BACKUP_PATHS+=("$path")
+        else
+            log_warn "Directory not found, skipping: $path"
+        fi
+    done < <(echo "$BACKUP_DIRS" | tr ',' '\n')
+fi
 
-# Save to configured destination(s)
-BACKUP_KEY="${BACKUP_NAME}/$(basename "$ENCRYPTED_FILE")"
-save_backup "$ENCRYPTED_FILE" "$BACKUP_KEY"
+# Add files from BACKUP_FILES - copy to staging so they're captured
+if [ -n "${BACKUP_FILES:-}" ]; then
+    mkdir -p "${STAGING_DIR}/files"
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        IFS=':' read -r filepath name <<<"$line"
+        filepath=$(echo "$filepath" | xargs)
+        name=$(echo "$name" | xargs)
+        if [ -f "$filepath" ]; then
+            log_debug "Adding file to backup: $filepath as $name"
+            cp "$filepath" "${STAGING_DIR}/files/${name}"
+        else
+            log_warn "File not found, skipping: $filepath"
+        fi
+    done < <(echo "$BACKUP_FILES" | tr ',' '\n')
+    if [ -n "$(ls -A "${STAGING_DIR}/files" 2>/dev/null)" ]; then
+        BACKUP_PATHS+=("${STAGING_DIR}/files")
+    fi
+fi
 
-# Cleanup old backups
-cleanup_old_backups "${BACKUP_NAME}"
+# Check if we have anything to backup
+if [ ${#BACKUP_PATHS[@]} -eq 0 ]; then
+    send_failure "No backup data found - check your backup configuration"
+fi
+
+# Run restic backup
+restic_backup "${BACKUP_PATHS[@]}"
+
+# Apply retention policy
+restic_forget_prune
 
 # Send success notification
 send_success "${BACKUP_NAME} backup completed: ${TIMESTAMP}"

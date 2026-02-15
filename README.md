@@ -1,24 +1,22 @@
 # Docker Backup Sidecar
 
 A flexible, production-ready backup sidecar container for Docker Compose applications.
-Backup your databases, files, and volumes to local storage or S3-compatible cloud storage
-with encryption, scheduling, and automatic retention management.
+Backup your databases, files, and volumes using restic for incremental, deduplicated,
+encrypted backups to any storage backend.
 
 ## Features
 
-- **Simple Configuration**: Just set `BACKUP_NAME` to identify your backups
-- **Multiple Database Support**: PostgreSQL, MongoDB, SQLite
+- **Simple Configuration**: Just set `BACKUP_NAME` and `RESTIC_REPOSITORY` to get started
+- **Multiple Database Support**: PostgreSQL, MongoDB, Redis, SQLite
 - **File & Directory Backups**: Backup any files or directories from mounted volumes
-- **Flexible Destinations**:
-  - Local mounted directory
-  - S3-compatible storage (AWS S3, Backblaze B2, Wasabi, MinIO, etc.)
-  - Both simultaneously for redundancy
-- **Security**: GPG encryption for all backups
+- **Restic-based Backups**: Incremental, deduplicated, content-addressed storage
+- **Built-in Encryption**: AES-256 encryption via restic (no separate GPG step)
+- **Flexible Storage Backends**: Local, S3, B2, SFTP, REST server, and more via restic
 - **Automated Scheduling**: Cron-based scheduled backups
-- **Retention Management**: Automatic cleanup of old backups
+- **Retention Management**: Automatic cleanup via `restic forget --prune`
 - **Container Management**: Stop/start containers before/after backup (essential for SQLite)
 - **Health Monitoring**: Webhook notifications for success/failure
-- **Easy Restore**: Simple restore scripts with automatic destination detection
+- **Easy Restore**: Snapshot-based restore with automatic database/file recovery
 
 ## Quick Start
 
@@ -33,7 +31,7 @@ services:
       - app-data:/data
 
   db:
-    image: postgres:15-alpine
+    image: postgres:16-alpine
     environment:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
     volumes:
@@ -58,7 +56,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       # Mount data you want to backup (read-only recommended)
       - app-data:/data:ro
-      # Local backup storage (optional)
+      # Local backup storage (restic repo)
       - ./backups:/backups-local
     # No command needed! The entrypoint handles cron setup automatically
     # based on BACKUP_SCHEDULE environment variable
@@ -78,17 +76,17 @@ cp .env.example .env
 nano .env
 ```
 
-Minimum configuration for local backups:
+Minimum configuration:
 
 ```bash
 # Backup name (REQUIRED)
 BACKUP_NAME=myapp-production
 
-# Backup destination
-BACKUP_LOCAL_PATH=/backups-local
+# Restic repository (REQUIRED)
+RESTIC_REPOSITORY=/backups-local/myapp
 
-# Encryption key (IMPORTANT: Store securely!)
-BACKUP_ENCRYPTION_KEY=your-very-strong-passphrase-here
+# Restic password (REQUIRED - store securely!)
+RESTIC_PASSWORD=your-very-strong-passphrase-here
 
 # What to backup
 BACKUP_POSTGRES=postgresql://postgres:yourpassword@db:5432/myapp
@@ -142,7 +140,7 @@ docker compose exec backup /backup-scripts/backup-now.sh
 
 ### Backup Name (Required)
 
-Set `BACKUP_NAME` to uniquely identify your backups. This is used to organize backup files in storage.
+Set `BACKUP_NAME` to uniquely identify your backups. This is used to tag snapshots in the restic repository.
 
 ```bash
 # Required: Unique identifier for your backups
@@ -152,19 +150,17 @@ BACKUP_NAME=myapp-production
 Examples:
 
 - `myapp-prod` for production environment
-- `website-staging` for staging environment  
+- `website-staging` for staging environment
 - `api-v2-prod` for specific services
 
-Backup filenames will be: `${BACKUP_NAME}-2025-10-19-020000.tar.gz.gpg`
+### Restic Repository (Required)
 
-### Backup Destinations
+Restic supports many storage backends natively:
 
-You can configure local, S3, or both:
-
-#### Local Only
+#### Local Storage
 
 ```bash
-BACKUP_LOCAL_PATH=/backups-local
+RESTIC_REPOSITORY=/backups-local/myapp
 ```
 
 Make sure to mount this path in docker-compose.yml:
@@ -174,26 +170,32 @@ volumes:
   - ./backups:/backups-local
 ```
 
-#### S3 Only
+#### S3-compatible Storage
 
 ```bash
-BACKUP_S3_BUCKET=my-backup-bucket
-BACKUP_S3_ENDPOINT=https://s3.amazonaws.com
-BACKUP_S3_REGION=us-east-1
-BACKUP_S3_ACCESS_KEY=your-access-key
-BACKUP_S3_SECRET_KEY=your-secret-key
+RESTIC_REPOSITORY=s3:s3.us-east-1.amazonaws.com/my-bucket/myapp
+AWS_ACCESS_KEY_ID=your-access-key
+AWS_SECRET_ACCESS_KEY=your-secret-key
 ```
 
-#### Both (Recommended for redundancy)
+#### Backblaze B2
 
 ```bash
-# Local
-BACKUP_LOCAL_PATH=/backups-local
+RESTIC_REPOSITORY=b2:bucket-name:myapp
+B2_ACCOUNT_ID=your-account-id
+B2_ACCOUNT_KEY=your-account-key
+```
 
-# S3
-BACKUP_S3_BUCKET=my-backup-bucket
-BACKUP_S3_ACCESS_KEY=your-access-key
-BACKUP_S3_SECRET_KEY=your-secret-key
+#### SFTP
+
+```bash
+RESTIC_REPOSITORY=sftp:user@host:/backups/myapp
+```
+
+#### REST Server
+
+```bash
+RESTIC_REPOSITORY=rest:http://host:8000/myapp
 ```
 
 ### Database Configuration
@@ -230,9 +232,26 @@ BACKUP_MONGODB=mongodb://root:${MONGO_PASSWORD}@mongo:27017/mydb?authSource=admi
 
 # Backup all databases (omit database name or use /)
 BACKUP_MONGODB=mongodb://user:pass@mongo:27017/?authSource=admin
+```
 
-# With additional options
-BACKUP_MONGODB=mongodb://user:pass@mongo:27017/mydb?authSource=admin&ssl=true
+#### Redis
+
+Redis RDB snapshots are backed up by triggering a `SAVE` command and copying the RDB file:
+
+```bash
+# Redis connection URI
+BACKUP_REDIS=redis://redis:6379
+
+# Where Redis data is mounted in the backup container (default: /redis-data)
+BACKUP_REDIS_DATA_DIR=/redis-data
+```
+
+In your docker-compose.yml, mount the Redis data directory into the backup container:
+
+```yaml
+backup:
+  volumes:
+    - redis-data:/redis-data:ro
 ```
 
 #### SQLite
@@ -252,6 +271,8 @@ BACKUP_STOP_WAIT=10
 ### Files and Directories
 
 #### Directories
+
+Directories are backed up directly by restic for efficient deduplication:
 
 ```bash
 # Format: /path:name,/path2:name2
@@ -298,30 +319,30 @@ The backup sidecar will:
 docker compose exec backup /backup-scripts/backup-now.sh
 ```
 
-### List Available Backups
+### List Available Snapshots
 
 ```bash
 docker compose exec backup /backup-scripts/list-backups.sh
 ```
 
-### Restore from Backup
+### Restore from Snapshot
 
 ```bash
-# List backups first to find the timestamp
+# List snapshots first to find the snapshot ID
 docker compose exec backup /backup-scripts/list-backups.sh
 
-# Restore (replace YYYY-MM-DD-HHMMSS with actual timestamp)
-docker compose exec backup /backup-scripts/restore.sh YYYY-MM-DD-HHMMSS
+# Restore (replace <snapshot-id> with actual ID, or use 'latest')
+docker compose exec backup /backup-scripts/restore.sh <snapshot-id>
+docker compose exec backup /backup-scripts/restore.sh latest
 ```
 
 The restore script will:
 
-1. Download/load the backup
-2. Decrypt it
-3. Show a 10-second warning
-4. Stop all services
-5. Restore databases, files, and directories
-6. Start all services
+1. Restore the snapshot to a temporary directory
+2. Show a 10-second warning
+3. Stop configured services
+4. Restore databases, files, and directories
+5. Start services
 
 ### View Logs
 
@@ -335,27 +356,21 @@ docker compose exec backup tail -f /var/log/backup.log
 
 ## Storage Structure
 
-Backups are organized by hostname and backup name:
-
-### Local Storage
+Restic uses a content-addressed storage format with deduplication:
 
 ```text
 ./backups/
-  └── myapp/
-      ├── myapp-2025-10-19-020000.tar.gz.gpg
-      ├── myapp-2025-10-18-020000.tar.gz.gpg
-      └── myapp-2025-10-17-020000.tar.gz.gpg
+  └── docker-backup-sidecar-test/
+      ├── config          # Repository configuration
+      ├── data/           # Deduplicated data packs
+      ├── index/          # Index files
+      ├── keys/           # Encryption keys
+      ├── locks/          # Lock files
+      └── snapshots/      # Snapshot metadata
 ```
 
-### S3 Storage
-
-```text
-s3://my-backup-bucket/
-  └── myapp/
-      ├── myapp-2025-10-19-020000.tar.gz.gpg
-      ├── myapp-2025-10-18-020000.tar.gz.gpg
-      └── myapp-2025-10-17-020000.tar.gz.gpg
-```
+Each snapshot contains the full backup tree. Restic handles deduplication
+automatically, so unchanged data is not stored twice.
 
 ## Common Scenarios
 
@@ -390,10 +405,10 @@ volumes:
 
 ```bash
 # .env
-BACKUP_LOCAL_PATH=/backups-local
+RESTIC_REPOSITORY=/backups-local/myapp
+RESTIC_PASSWORD=strong-passphrase-here
 BACKUP_POSTGRES=postgresql://postgres:${DB_PASSWORD}@db:5432/myapp
 BACKUP_DIRS=/app/uploads:uploads
-BACKUP_ENCRYPTION_KEY=strong-passphrase-here
 ```
 
 ### Scenario 2: App with SQLite Database
@@ -422,10 +437,10 @@ services:
 
 ```bash
 # .env
-BACKUP_LOCAL_PATH=/backups-local
+RESTIC_REPOSITORY=/backups-local/mywebapp
+RESTIC_PASSWORD=strong-passphrase-here
 BACKUP_FILES=/app/data/app.db:database
 BACKUP_DIRS=/app/data/uploads:uploads
-BACKUP_ENCRYPTION_KEY=strong-passphrase-here
 ```
 
 Note: SQLite databases should be backed up using `BACKUP_FILES` with the container stopped via `BACKUP_STOP_SERVICES`.
@@ -435,13 +450,10 @@ Note: SQLite databases should be backed up using `BACKUP_FILES` with the contain
 ```bash
 # .env
 # S3 Configuration
-BACKUP_S3_BUCKET=my-company-backups
-BACKUP_S3_ACCESS_KEY=xxx
-BACKUP_S3_SECRET_KEY=xxx
-BACKUP_S3_REGION=us-east-1
-
-# Also save locally for quick restore
-BACKUP_LOCAL_PATH=/backups-local
+RESTIC_REPOSITORY=s3:s3.us-east-1.amazonaws.com/my-company-backups/myapp
+RESTIC_PASSWORD=strong-passphrase-here
+AWS_ACCESS_KEY_ID=xxx
+AWS_SECRET_ACCESS_KEY=xxx
 
 # Multiple databases
 BACKUP_POSTGRES=postgresql://postgres:${PG_PASSWORD}@postgres:5432/maindb
@@ -454,9 +466,33 @@ BACKUP_FILES=/secrets/api-key.txt:apikey
 # Monitoring
 BACKUP_SUCCESS_WEBHOOK=https://hc-ping.com/your-uuid
 BACKUP_FAILURE_WEBHOOK=https://hc-ping.com/your-uuid/fail
+```
 
-# Encryption
-BACKUP_ENCRYPTION_KEY=strong-passphrase-here
+### Scenario 4: App with Redis Cache + PostgreSQL
+
+```yaml
+# docker-compose.yml
+services:
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis-data:/data
+    command: redis-server --save 60 1
+
+  backup:
+    # ... (backup service config)
+    volumes:
+      - redis-data:/redis-data:ro
+      - ./backups:/backups-local
+```
+
+```bash
+# .env
+RESTIC_REPOSITORY=/backups-local/myapp
+RESTIC_PASSWORD=strong-passphrase-here
+BACKUP_POSTGRES=postgresql://postgres:pass@db:5432/myapp
+BACKUP_REDIS=redis://redis:6379
+BACKUP_REDIS_DATA_DIR=/redis-data
 ```
 
 ## Health Monitoring
@@ -476,11 +512,11 @@ The sidecar will ping on success and failure automatically. Can be set to use an
 
 ## Security Best Practices
 
-1. **Encryption Key**
+1. **Restic Password**
    - Use a strong, random passphrase
    - Store in a password manager
    - Never commit to git
-   - Without this key, backups cannot be restored!
+   - Without this password, backups cannot be restored!
 
 2. **S3 Credentials**
    - Use IAM policies to restrict bucket access
@@ -512,26 +548,30 @@ docker compose logs backup
 docker compose exec backup cat /var/log/backup.log
 ```
 
-### S3 upload failing
+### Restic repository issues
 
 ```bash
-# Test S3 credentials manually
-docker compose exec backup sh
-aws s3 ls s3://your-bucket/
+# Check restic repo status
+docker compose exec backup restic snapshots
 
-# Check AWS CLI configuration
-env | grep AWS
+# Check repo integrity
+docker compose exec backup restic check
+
+# Unlock a stale lock
+docker compose exec backup restic unlock
 ```
 
-### Encryption/Decryption errors
+### Redis backup issues
 
 ```bash
-# Verify encryption key is set
-docker compose exec backup sh -c 'echo $BACKUP_ENCRYPTION_KEY'
+# Verify Redis data directory is mounted
+docker compose exec backup ls -la /redis-data/
 
-# Test encryption manually
-docker compose exec backup sh
-echo "test" | gpg --symmetric --batch --passphrase "your-key"
+# Test Redis connectivity from backup container
+docker compose exec backup redis-cli -u redis://redis:6379 ping
+
+# Check if RDB file exists
+docker compose exec backup ls -la /redis-data/dump.rdb
 ```
 
 ### Container stop/start not working
@@ -569,31 +609,15 @@ BACKUP_SCHEDULE=*/15 * * * *
 
 ### Retention Policy Configuration
 
-The backup sidecar uses a **Grandfather-Father-Son (GFS)** retention policy
-that keeps backups in multiple tiers for long-term storage.
-
-#### How GFS Retention Works
-
-Backups are automatically classified into five tiers:
-
-1. **Recent** - Keep the last N backups (quick recovery from recent issues)
-2. **Daily** - One backup per day for N days
-3. **Weekly** - One backup per week for N weeks  
-4. **Monthly** - One backup per month for N months
-5. **Yearly** - One backup per year for N years
-
-Each backup can belong to multiple tiers. For example, the most recent backup is
-counted in all applicable tiers, preventing excessive deletion.
-
-#### Default Configuration
+Restic manages retention via `restic forget --prune`:
 
 ```bash
 # Defaults if not set
-BACKUP_RETENTION_RECENT=14      # Keep the last N backups regardless of age
-BACKUP_RETENTION_DAILY=7        # Keep one backup per day for N days
-BACKUP_RETENTION_WEEKLY=4       # Keep one backup per week for N weeks
-BACKUP_RETENTION_MONTHLY=0      # Keep one backup per month for N months
-BACKUP_RETENTION_YEARLY=0       # Keep one backup per year for N years
+RESTIC_KEEP_LAST=14      # Keep the last N snapshots
+RESTIC_KEEP_DAILY=7      # Keep one snapshot per day for N days
+RESTIC_KEEP_WEEKLY=4     # Keep one snapshot per week for N weeks
+RESTIC_KEEP_MONTHLY=0    # Keep one snapshot per month for N months (0 = disabled)
+RESTIC_KEEP_YEARLY=0     # Keep one snapshot per year for N years (0 = disabled)
 ```
 
 ### Debug Mode
@@ -610,7 +634,7 @@ In case of complete infrastructure loss:
 
 1. **Setup new server** with Docker and docker-compose
 2. **Deploy backup container** with same .env configuration
-3. **List backups**:
+3. **List snapshots**:
 
    ```bash
    docker compose exec backup /backup-scripts/list-backups.sh
@@ -619,7 +643,11 @@ In case of complete infrastructure loss:
 4. **Restore**:
 
    ```bash
-   docker compose exec backup /backup-scripts/restore.sh 2025-10-19-020000
+   # Restore latest snapshot
+   docker compose exec backup /backup-scripts/restore.sh latest
+
+   # Or restore a specific snapshot
+   docker compose exec backup /backup-scripts/restore.sh abc1234
    ```
 
 5. **Verify** application is working correctly

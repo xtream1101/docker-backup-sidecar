@@ -67,592 +67,209 @@ send_failure() {
     exit 1
 }
 
-# Determine which backup destinations are configured
-# Returns: "local", "s3", or "both"
-get_backup_destination() {
-    local has_local=false
-    local has_s3=false
+# ============================================================================
+# Restic Functions
+# ============================================================================
 
-    # Check if local backup is configured
-    if [ -n "${BACKUP_LOCAL_PATH:-}" ]; then
-        has_local=true
+# Validate restic configuration
+validate_restic_config() {
+    if [ -z "${RESTIC_REPOSITORY:-}" ]; then
+        send_failure "RESTIC_REPOSITORY is required. Example: /backups-local/myapp or s3:s3.amazonaws.com/bucket/myapp"
     fi
 
-    # Check if S3 is configured
-    if [ -n "${BACKUP_S3_BUCKET:-}" ]; then
-        has_s3=true
+    if [ -z "${RESTIC_PASSWORD:-}" ]; then
+        send_failure "RESTIC_PASSWORD is required for repository encryption"
     fi
 
-    if [ "$has_local" = true ] && [ "$has_s3" = true ]; then
-        echo "both"
-    elif [ "$has_local" = true ]; then
-        echo "local"
-    elif [ "$has_s3" = true ]; then
-        echo "s3"
-    else
-        echo "none"
-    fi
+    export RESTIC_REPOSITORY
+    export RESTIC_PASSWORD
+
+    log_debug "Restic repository: ${RESTIC_REPOSITORY}"
 }
 
-# Validate backup destination configuration
-validate_backup_config() {
-    local destination
-    destination=$(get_backup_destination)
+# Initialize restic repository if it doesn't exist
+restic_init() {
+    log_debug "Checking if restic repository exists..."
 
-    if [ "$destination" = "none" ]; then
-        send_failure "No backup destination configured. Set BACKUP_LOCAL_PATH or BACKUP_S3_BUCKET"
-    fi
-
-    log_debug "Backup destination: $destination"
-}
-
-# Configure AWS CLI for S3
-configure_s3() {
-    if [ -z "${BACKUP_S3_ACCESS_KEY:-}" ] || [ -z "${BACKUP_S3_SECRET_KEY:-}" ]; then
-        log_warn "S3 credentials not set, S3 operations will fail"
-        return 1
-    fi
-
-    export AWS_ACCESS_KEY_ID="${BACKUP_S3_ACCESS_KEY}"
-    export AWS_SECRET_ACCESS_KEY="${BACKUP_S3_SECRET_KEY}"
-    export AWS_DEFAULT_REGION="${BACKUP_S3_REGION:-us-east-1}"
-
-    # Set custom endpoint if not AWS
-    if [ "${BACKUP_S3_ENDPOINT:-https://s3.amazonaws.com}" != "https://s3.amazonaws.com" ]; then
-        export AWS_ENDPOINT_URL="${BACKUP_S3_ENDPOINT}"
-    fi
-
-    log_debug "S3 configured: bucket=${BACKUP_S3_BUCKET}, region=${AWS_DEFAULT_REGION}"
-}
-
-# Encrypt file with GPG
-encrypt_file() {
-    local input_file="$1"
-    local output_file="${input_file}.gpg"
-
-    if [ -z "${BACKUP_ENCRYPTION_KEY:-}" ]; then
-        log_warn "BACKUP_ENCRYPTION_KEY not set, skipping encryption"
-        echo "$input_file"
+    if restic snapshots --json >/dev/null 2>&1; then
+        log_debug "Restic repository already initialized"
         return 0
     fi
 
-    log_info "Encrypting backup..."
+    log_info "Initializing new restic repository: ${RESTIC_REPOSITORY}"
+    restic init || send_failure "Failed to initialize restic repository"
+    log_info "Restic repository initialized successfully"
+}
 
-    # Check if gpg is available
-    if ! command -v gpg >/dev/null 2>&1; then
-        send_failure "GPG not available for encryption"
-        # shellcheck disable=SC2317  # Unreachable due to send_failure exit
-        return 1
+# Run restic backup with given paths
+restic_backup() {
+    local -a paths=("$@")
+
+    if [ ${#paths[@]} -eq 0 ]; then
+        send_failure "No paths provided to restic_backup"
     fi
 
-    # Run GPG command
-    if gpg --symmetric \
-        --batch \
-        --yes \
-        --cipher-algo AES256 \
-        --passphrase "$BACKUP_ENCRYPTION_KEY" \
-        --output "$output_file" \
-        "$input_file" 2>/dev/null; then
+    log_info "Running restic backup..."
+    log_debug "Backup paths: ${paths[*]}"
 
-        if [ ! -f "$output_file" ]; then
-            send_failure "Encryption failed - output file not created"
-            # shellcheck disable=SC2317  # Unreachable due to send_failure exit
-            return 1
+    local -a cmd=(restic backup --tag "${BACKUP_NAME}")
+
+    if [ "${BACKUP_DEBUG:-false}" = "true" ]; then
+        cmd+=(--verbose)
+    fi
+
+    cmd+=("${paths[@]}")
+
+    "${cmd[@]}" || send_failure "Restic backup failed"
+
+    log_info "Restic backup completed successfully"
+}
+
+# Apply retention policy and prune
+restic_forget_prune() {
+    local keep_last="${RESTIC_KEEP_LAST:-14}"
+    local keep_daily="${RESTIC_KEEP_DAILY:-7}"
+    local keep_weekly="${RESTIC_KEEP_WEEKLY:-4}"
+    local keep_monthly="${RESTIC_KEEP_MONTHLY:-0}"
+    local keep_yearly="${RESTIC_KEEP_YEARLY:-0}"
+
+    log_info "Applying retention policy..."
+    log_debug "Retention: last=$keep_last daily=$keep_daily weekly=$keep_weekly monthly=$keep_monthly yearly=$keep_yearly"
+
+    local -a cmd=(restic forget --prune --tag "${BACKUP_NAME}")
+    cmd+=(--keep-last "$keep_last")
+
+    [ "$keep_daily" -gt 0 ] && cmd+=(--keep-daily "$keep_daily")
+    [ "$keep_weekly" -gt 0 ] && cmd+=(--keep-weekly "$keep_weekly")
+    [ "$keep_monthly" -gt 0 ] && cmd+=(--keep-monthly "$keep_monthly")
+    [ "$keep_yearly" -gt 0 ] && cmd+=(--keep-yearly "$keep_yearly")
+
+    "${cmd[@]}" || log_warn "Restic forget/prune had warnings (non-fatal)"
+
+    log_info "Retention policy applied"
+}
+
+# List snapshots
+restic_snapshots() {
+    restic snapshots --tag "${BACKUP_NAME}" || send_failure "Failed to list snapshots"
+}
+
+# Restore a snapshot to a target directory
+restic_restore() {
+    local snapshot_id="$1"
+    local target_dir="$2"
+
+    log_info "Restoring snapshot ${snapshot_id} to ${target_dir}..."
+
+    mkdir -p "$target_dir"
+    restic restore "$snapshot_id" --target "$target_dir" || send_failure "Restic restore failed for snapshot ${snapshot_id}"
+
+    log_info "Restic restore completed successfully"
+}
+
+# ============================================================================
+# Redis Functions
+# ============================================================================
+
+# Dump Redis databases via RDB snapshot
+dump_redis() {
+    local config="$1"
+    local staging_dir="$2"
+
+    # Skip if empty
+    [ -z "$config" ] && return 0
+
+    # BACKUP_REDIS_DATA_DIR specifies where the Redis data directory is mounted
+    # in the backup container. This is needed because redis-cli CONFIG GET dir
+    # returns the path inside the Redis container, not the backup container.
+    local redis_data_dir="${BACKUP_REDIS_DATA_DIR:-/redis-data}"
+
+    local db_index=0
+
+    echo "$config" | while IFS= read -r line; do
+        # Skip empty lines and comments
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+
+        local uri="$line"
+        db_index=$((db_index + 1))
+
+        log_info "Backing up Redis database ($db_index)..."
+
+        # Trigger SAVE to create a fresh RDB snapshot
+        redis-cli -u "$uri" SAVE || {
+            log_warn "Redis SAVE command failed for database $db_index"
+            continue
+        }
+
+        # Get the RDB filename from Redis CONFIG
+        local rdb_file
+        rdb_file=$(redis-cli -u "$uri" CONFIG GET dbfilename 2>/dev/null | tail -1)
+
+        if [ -z "$rdb_file" ]; then
+            rdb_file="dump.rdb"
+            log_debug "Could not determine Redis RDB filename, using default: $rdb_file"
         fi
 
-        # Remove unencrypted file
-        rm -f "$input_file"
-        echo "$output_file"
-        return 0
-    else
-        send_failure "Encryption failed"
-        # shellcheck disable=SC2317  # Unreachable due to send_failure exit
-        return 1
-    fi
+        local rdb_path="${redis_data_dir}/${rdb_file}"
+        log_debug "Redis RDB path: $rdb_path"
+
+        # Copy the RDB file to staging
+        if [ -f "$rdb_path" ]; then
+            cp "$rdb_path" "${staging_dir}/redis-${db_index}.rdb" || log_warn "Failed to copy Redis RDB for database $db_index"
+            log_info "Redis database $db_index backed up successfully"
+        else
+            log_warn "Redis RDB file not found at $rdb_path - ensure the Redis data directory is mounted at ${redis_data_dir}"
+        fi
+    done
 }
 
-# Decrypt file with GPG
-decrypt_file() {
-    local input_file="$1"
-    local output_file="${input_file%.gpg}"
+# Restore Redis RDB files
+restore_redis() {
+    local config="$1"
+    local restore_dir="$2"
 
-    if [ -z "${BACKUP_ENCRYPTION_KEY:-}" ]; then
-        send_failure "BACKUP_ENCRYPTION_KEY not set, cannot decrypt"
-    fi
+    # Skip if empty
+    [ -z "$config" ] && return 0
 
-    log_info "Decrypting backup..."
-    gpg --decrypt \
-        --batch \
-        --yes \
-        --passphrase "$BACKUP_ENCRYPTION_KEY" \
-        --output "$output_file" \
-        "$input_file" || send_failure "Decryption failed"
+    local redis_data_dir="${BACKUP_REDIS_DATA_DIR:-/redis-data}"
 
-    echo "$output_file"
-}
+    local db_index=0
 
-# Save file to local backup directory
-save_to_local() {
-    local file_path="$1"
-    local backup_key="$2"
-    local dest_path="${BACKUP_LOCAL_PATH}/${backup_key}"
+    echo "$config" | while IFS= read -r line; do
+        # Skip empty lines and comments
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
 
-    log_info "Saving to local: $dest_path"
+        local uri="$line"
+        db_index=$((db_index + 1))
 
-    # Create parent directory if it doesn't exist
-    mkdir -p "$(dirname "$dest_path")"
+        local rdb_file="${restore_dir}/redis-${db_index}.rdb"
 
-    # Copy the file
-    cp "$file_path" "$dest_path" || send_failure "Local save failed"
-
-    log_info "Local save completed successfully"
-}
-
-# Load file from local backup directory
-load_from_local() {
-    local backup_key="$1"
-    local local_path="$2"
-    local source_path="${BACKUP_LOCAL_PATH}/${backup_key}"
-
-    if [ ! -f "$source_path" ]; then
-        send_failure "Backup not found: $source_path"
-    fi
-
-    log_info "Loading from local: $source_path"
-
-    # Copy the file
-    cp "$source_path" "$local_path" || send_failure "Local load failed"
-
-    log_info "Local load completed successfully"
-}
-
-# Upload file to S3
-upload_to_s3() {
-    local file_path="$1"
-    local s3_key="$2"
-    local s3_path="s3://${BACKUP_S3_BUCKET}/${s3_key}"
-
-    log_info "Uploading to S3: $s3_path"
-
-    if ! configure_s3; then
-        log_error "S3 upload skipped - configuration failed"
-        return 1
-    fi
-
-    aws s3 cp "$file_path" "$s3_path" || {
-        log_error "S3 upload failed"
-        return 1
-    }
-
-    log_info "S3 upload completed successfully"
-}
-
-# Download file from S3
-download_from_s3() {
-    local s3_key="$1"
-    local local_path="$2"
-    local s3_path="s3://${BACKUP_S3_BUCKET}/${s3_key}"
-
-    log_info "Downloading from S3: $s3_path"
-
-    if ! configure_s3; then
-        send_failure "S3 download failed - configuration error"
-    fi
-
-    aws s3 cp "$s3_path" "$local_path" || send_failure "S3 download failed"
-
-    log_info "S3 download completed successfully"
-}
-
-save_backup() {
-    local file_path="$1"
-    local backup_key="$2"
-    local destination
-    destination=$(get_backup_destination)
-
-    local saved_somewhere=false
-
-    case "$destination" in
-        "local")
-            save_to_local "$file_path" "$backup_key"
-            saved_somewhere=true
-            ;;
-        "s3")
-            if upload_to_s3 "$file_path" "$backup_key"; then
-                saved_somewhere=true
-            fi
-            ;;
-        "both")
-            save_to_local "$file_path" "$backup_key"
-            saved_somewhere=true
-
-            if ! upload_to_s3 "$file_path" "$backup_key"; then
-                log_warn "S3 upload failed, but local backup succeeded"
-            fi
-            ;;
-        *)
-            send_failure "Invalid backup destination: $destination"
-            ;;
-    esac
-
-    if [ "$saved_somewhere" = false ]; then
-        send_failure "Backup save failed to all destinations"
-    fi
-}
-load_backup() {
-    local backup_key="$1"
-    local local_path="$2"
-    local destination
-    destination=$(get_backup_destination)
-
-    case "$destination" in
-        "local")
-            load_from_local "$backup_key" "$local_path"
-            ;;
-        "s3")
-            download_from_s3 "$backup_key" "$local_path"
-            ;;
-        "both")
-            # Try local first, then S3
-            if [ -f "${BACKUP_LOCAL_PATH}/${backup_key}" ]; then
-                load_from_local "$backup_key" "$local_path"
-            else
-                log_info "Backup not found locally, trying S3..."
-                download_from_s3 "$backup_key" "$local_path"
-            fi
-            ;;
-        *)
-            send_failure "Invalid backup destination: $destination"
-            ;;
-    esac
-}
-
-# Parse timestamp from backup filename
-# Expected format: backupname-YYYY-MM-DD-HHMMSS.tar.gz[.gpg]
-parse_backup_timestamp() {
-    local filename="$1"
-    # Extract timestamp: YYYY-MM-DD-HHMMSS
-    echo "$filename" | sed -n 's/.*-\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}-[0-9]\{6\}\)\.tar\.gz.*/\1/p'
-}
-
-# Convert timestamp to Unix epoch (seconds since 1970-01-01)
-timestamp_to_epoch() {
-    local timestamp="$1"
-    # Format: YYYY-MM-DD-HHMMSS -> YYYY-MM-DD HH:MM:SS
-    local date_part="${timestamp:0:10}"
-    local time_part="${timestamp:11:2}:${timestamp:13:2}:${timestamp:15:2}"
-
-    # Use date command (works with BusyBox, GNU, and BSD date)
-    date -d "$date_part $time_part" +%s 2>/dev/null || date -j -f "%Y-%m-%d %H:%M:%S" "$date_part $time_part" +%s 2>/dev/null || echo "0"
-}
-
-# Get start of day/week/month/year for a given timestamp
-get_period_start() {
-    local epoch="$1"
-    local period="$2" # day, week, month, year
-
-    case "$period" in
-        "day")
-            date -d "@$epoch" +%Y-%m-%d 2>/dev/null || date -r "$epoch" +%Y-%m-%d 2>/dev/null
-            ;;
-        "week")
-            # Get Monday of the week (ISO week)
-            local dow
-            dow=$(date -d "@$epoch" +%u 2>/dev/null || date -r "$epoch" +%u 2>/dev/null)
-            local offset=$((dow - 1))
-            local week_start=$((epoch - (offset * 86400)))
-            date -d "@$week_start" +%Y-W%V 2>/dev/null || date -r "$week_start" +%Y-W%V 2>/dev/null
-            ;;
-        "month")
-            date -d "@$epoch" +%Y-%m 2>/dev/null || date -r "$epoch" +%Y-%m 2>/dev/null
-            ;;
-        "year")
-            date -d "@$epoch" +%Y 2>/dev/null || date -r "$epoch" +%Y 2>/dev/null
-            ;;
-    esac
-}
-
-# Classify backups into GFS tiers and select which to keep
-# Returns list of filenames to keep (one per line)
-classify_backups_gfs() {
-    local backup_list="$1"
-    local current_epoch
-    current_epoch=$(date +%s)
-
-    # Get retention settings (defaults match common use cases)
-    local retention_recent="${BACKUP_RETENTION_RECENT:-14}"  # Keep last 14 backups
-    local retention_daily="${BACKUP_RETENTION_DAILY:-7}"     # Keep 7 daily backups
-    local retention_weekly="${BACKUP_RETENTION_WEEKLY:-4}"   # Keep 4 weekly backups
-    local retention_monthly="${BACKUP_RETENTION_MONTHLY:-0}" # Keep 0 monthly backups (disabled by default)
-    local retention_yearly="${BACKUP_RETENTION_YEARLY:-0}"   # Keep 0 yearly backups (disabled by default)
-
-    log_debug "GFS Retention Policy: Recent=$retention_recent, Daily=$retention_daily, Weekly=$retention_weekly, Monthly=$retention_monthly, Yearly=$retention_yearly"
-
-    # Arrays to track selected backups for each tier
-    declare -A recent_backups
-    declare -A daily_backups
-    declare -A weekly_backups
-    declare -A monthly_backups
-    declare -A yearly_backups
-
-    # Parse all backups and extract timestamps
-    local -a backup_epochs
-    local -a backup_files
-
-    while IFS= read -r backup_file; do
-        [ -z "$backup_file" ] && continue
-
-        local timestamp
-        timestamp=$(parse_backup_timestamp "$backup_file")
-
-        if [ -z "$timestamp" ]; then
-            log_debug "Skipping file with invalid timestamp format: $backup_file"
+        if [ ! -f "$rdb_file" ]; then
+            log_warn "Redis RDB file not found for database $db_index, skipping"
             continue
         fi
 
-        local epoch
-        epoch=$(timestamp_to_epoch "$timestamp")
+        log_info "Restoring Redis database $db_index..."
 
-        if [ "$epoch" = "0" ]; then
-            log_debug "Could not parse timestamp for: $backup_file"
-            continue
+        # Get the RDB filename from Redis CONFIG
+        local rdb_filename
+        rdb_filename=$(redis-cli -u "$uri" CONFIG GET dbfilename 2>/dev/null | tail -1)
+
+        if [ -z "$rdb_filename" ]; then
+            rdb_filename="dump.rdb"
         fi
 
-        backup_epochs+=("$epoch")
-        backup_files+=("$backup_file")
-    done <<<"$backup_list"
+        local rdb_path="${redis_data_dir}/${rdb_filename}"
 
-    # Sort backups by epoch (newest first)
-    local -a sorted_indices
-    while IFS= read -r idx; do
-        sorted_indices+=("$idx")
-    done < <(
-        for i in "${!backup_epochs[@]}"; do
-            echo "${backup_epochs[$i]} $i"
-        done | sort -rn | awk '{print $2}'
-    )
-
-    # Tier 1: Recent backups (keep last N)
-    local recent_count=0
-    for idx in "${sorted_indices[@]}"; do
-        if [ "$recent_count" -lt "$retention_recent" ]; then
-            recent_backups["${backup_files[$idx]}"]=1
-            ((recent_count++))
-        fi
-    done
-
-    # Tier 2: Daily backups (one per day)
-    for idx in "${sorted_indices[@]}"; do
-        local epoch="${backup_epochs[$idx]}"
-        local age_days=$(((current_epoch - epoch) / 86400))
-
-        if [ "$age_days" -le "$retention_daily" ]; then
-            local day_key
-            day_key=$(get_period_start "$epoch" "day")
-
-            if [ -z "${daily_backups[$day_key]:-}" ]; then
-                daily_backups["$day_key"]="${backup_files[$idx]}"
-            fi
-        fi
-    done
-
-    # Tier 3: Weekly backups (one per week)
-    for idx in "${sorted_indices[@]}"; do
-        local epoch="${backup_epochs[$idx]}"
-        local age_weeks=$(((current_epoch - epoch) / 604800))
-
-        if [ "$age_weeks" -le "$retention_weekly" ]; then
-            local week_key
-            week_key=$(get_period_start "$epoch" "week")
-
-            if [ -z "${weekly_backups[$week_key]:-}" ]; then
-                weekly_backups["$week_key"]="${backup_files[$idx]}"
-            fi
-        fi
-    done
-
-    # Tier 4: Monthly backups (one per month)
-    for idx in "${sorted_indices[@]}"; do
-        local epoch="${backup_epochs[$idx]}"
-        local age_months=$(((current_epoch - epoch) / 2592000))
-
-        if [ "$age_months" -le "$retention_monthly" ]; then
-            local month_key
-            month_key=$(get_period_start "$epoch" "month")
-
-            if [ -z "${monthly_backups[$month_key]:-}" ]; then
-                monthly_backups["$month_key"]="${backup_files[$idx]}"
-            fi
-        fi
-    done
-
-    # Tier 5: Yearly backups (one per year)
-    for idx in "${sorted_indices[@]}"; do
-        local epoch="${backup_epochs[$idx]}"
-        local age_years=$(((current_epoch - epoch) / 31536000))
-
-        if [ "$age_years" -le "$retention_yearly" ]; then
-            local year_key
-            year_key=$(get_period_start "$epoch" "year")
-
-            if [ -z "${yearly_backups[$year_key]:-}" ]; then
-                yearly_backups["$year_key"]="${backup_files[$idx]}"
-            fi
-        fi
-    done
-
-    # Combine all backups to keep (using associative array to deduplicate)
-    declare -A keep_set
-
-    # Add recent backups
-    for file in "${!recent_backups[@]}"; do
-        keep_set["$file"]=1
-    done
-
-    # Add daily backups
-    for file in "${daily_backups[@]}"; do
-        keep_set["$file"]=1
-    done
-
-    # Add weekly backups
-    for file in "${weekly_backups[@]}"; do
-        keep_set["$file"]=1
-    done
-
-    # Add monthly backups
-    for file in "${monthly_backups[@]}"; do
-        keep_set["$file"]=1
-    done
-
-    # Add yearly backups
-    for file in "${yearly_backups[@]}"; do
-        keep_set["$file"]=1
-    done
-
-    # Output files to keep (one per line)
-    for file in "${!keep_set[@]}"; do
-        echo "$file"
+        # Copy RDB file to Redis data directory
+        cp "$rdb_file" "$rdb_path" || send_failure "Failed to restore Redis RDB for database $db_index"
+        log_info "Redis database $db_index restored successfully (restart Redis to load)"
     done
 }
 
-# Delete old backups from local storage using GFS policy
-cleanup_old_local_backups() {
-    local backup_prefix="$1"
-    local backup_dir="${BACKUP_LOCAL_PATH}/${backup_prefix}"
-
-    if [ ! -d "$backup_dir" ]; then
-        log_debug "Backup directory doesn't exist: $backup_dir"
-        return 0
-    fi
-
-    log_info "Applying GFS retention policy to local backups..."
-
-    # Get list of all backup files
-    local backup_list
-    backup_list=$(find "$backup_dir" -type f -name "*.tar.gz*" -printf "%f\n" 2>/dev/null | sort -r)
-
-    if [ -z "$backup_list" ]; then
-        log_debug "No local backups found"
-        return 0
-    fi
-
-    # Get list of backups to keep
-    local keep_list
-    keep_list=$(classify_backups_gfs "$backup_list")
-
-    # Convert keep list to associative array for fast lookup
-    declare -A keep_set
-    while IFS= read -r file; do
-        [ -n "$file" ] && keep_set["$file"]=1
-    done <<<"$keep_list"
-
-    # Delete backups not in keep list
-    local deleted_count=0
-    local kept_count=0
-
-    while IFS= read -r backup_file; do
-        [ -z "$backup_file" ] && continue
-
-        if [ -z "${keep_set[$backup_file]:-}" ]; then
-            log_info "Deleting old local backup: $backup_file"
-            rm -f "${backup_dir}/${backup_file}" || log_warn "Failed to delete $backup_file"
-            deleted_count=$((deleted_count + 1))
-        else
-            kept_count=$((kept_count + 1))
-        fi
-    done <<<"$backup_list"
-
-    log_info "Local retention: kept $kept_count backups, deleted $deleted_count backups"
-}
-
-# Delete old backups from S3 using GFS policy
-cleanup_old_s3_backups() {
-    local s3_prefix="$1"
-
-    if ! configure_s3; then
-        log_warn "S3 cleanup skipped - configuration failed"
-        return 0
-    fi
-
-    log_info "Applying GFS retention policy to S3 backups..."
-
-    # Get list of all backup files from S3
-    local backup_list
-    backup_list=$(aws s3 ls "s3://${BACKUP_S3_BUCKET}/${s3_prefix}/" 2>/dev/null | grep -E '\.tar\.gz(\.gpg)?$' | awk '{print $4}' | sort -r)
-
-    if [ -z "$backup_list" ]; then
-        log_debug "No S3 backups found"
-        return 0
-    fi
-
-    # Get list of backups to keep
-    local keep_list
-    keep_list=$(classify_backups_gfs "$backup_list")
-
-    # Convert keep list to associative array for fast lookup
-    declare -A keep_set
-    while IFS= read -r file; do
-        [ -n "$file" ] && keep_set["$file"]=1
-    done <<<"$keep_list"
-
-    # Delete backups not in keep list
-    local deleted_count=0
-    local kept_count=0
-
-    while IFS= read -r backup_file; do
-        [ -z "$backup_file" ] && continue
-
-        if [ -z "${keep_set[$backup_file]:-}" ]; then
-            log_info "Deleting old S3 backup: $backup_file"
-            aws s3 rm "s3://${BACKUP_S3_BUCKET}/${s3_prefix}/${backup_file}" || log_warn "Failed to delete $backup_file"
-            deleted_count=$((deleted_count + 1))
-        else
-            kept_count=$((kept_count + 1))
-        fi
-    done <<<"$backup_list"
-
-    log_info "S3 retention: kept $kept_count backups, deleted $deleted_count backups"
-}
-
-# Delete old backups from configured destination(s)
-cleanup_old_backups() {
-    local backup_prefix="$1"
-    local destination
-    destination=$(get_backup_destination)
-
-    case "$destination" in
-        "local")
-            cleanup_old_local_backups "$backup_prefix"
-            ;;
-        "s3")
-            cleanup_old_s3_backups "$backup_prefix"
-            ;;
-        "both")
-            cleanup_old_local_backups "$backup_prefix"
-            cleanup_old_s3_backups "$backup_prefix"
-            ;;
-    esac
-}
+# ============================================================================
+# Service Management
+# ============================================================================
 
 # Stop services before backup
 stop_services() {
@@ -778,6 +395,10 @@ start_services() {
         sleep "$wait_time"
     fi
 }
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
 
 # Generate timestamp for backup filename
 get_timestamp() {

@@ -13,6 +13,7 @@ log_info "Docker Backup Sidecar starting..."
 # Display backup name
 BACKUP_NAME=$(get_backup_name 2>/dev/null) || BACKUP_NAME="NOT_SET"
 log_info "Backup Name: ${BACKUP_NAME}"
+log_info "Restic Repository: ${RESTIC_REPOSITORY:-NOT_SET}"
 
 # If BACKUP_SCHEDULE is set, configure cron
 if [ -n "${BACKUP_SCHEDULE:-}" ]; then
@@ -30,7 +31,7 @@ else
     log_warn "BACKUP_SCHEDULE not set - running in manual mode"
     log_info "You can run backups manually with: /backup-scripts/backup-now.sh"
     log_info "List backups with: /backup-scripts/list-backups.sh"
-    log_info "Restore with: /backup-scripts/restore.sh <timestamp>"
+    log_info "Restore with: /backup-scripts/restore.sh <snapshot-id>"
     log_info ""
     log_info "Keeping container alive for manual operations..."
     exec tail -f /dev/null

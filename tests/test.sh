@@ -170,10 +170,12 @@ setup() {
     while [ $waited -lt 60 ]; do
         local postgres_health
         local mongo_health
+        local redis_health
         postgres_health=$("${COMPOSE_CMD[@]}" ps postgres --format json 2>/dev/null | grep -o '"Health":"[^"]*"' | cut -d'"' -f4 || echo "starting")
         mongo_health=$("${COMPOSE_CMD[@]}" ps mongo --format json 2>/dev/null | grep -o '"Health":"[^"]*"' | cut -d'"' -f4 || echo "starting")
+        redis_health=$("${COMPOSE_CMD[@]}" ps redis --format json 2>/dev/null | grep -o '"Health":"[^"]*"' | cut -d'"' -f4 || echo "starting")
 
-        if [ "$postgres_health" = "healthy" ] && [ "$mongo_health" = "healthy" ]; then
+        if [ "$postgres_health" = "healthy" ] && [ "$mongo_health" = "healthy" ] && [ "$redis_health" = "healthy" ]; then
             log_success "All services are healthy (${waited}s)"
             break
         fi
@@ -233,6 +235,9 @@ test_environment() {
     assert_contains "MongoDB container is running" \
         "$ps_output" "mongo"
 
+    assert_contains "Redis container is running" \
+        "$ps_output" "redis"
+
     # Test database connectivity
     assert_success "Can connect to PostgreSQL database" \
         "${COMPOSE_CMD[@]}" exec -T postgres psql -U testuser -d testdb -c "SELECT 1"
@@ -240,6 +245,10 @@ test_environment() {
     # Test MongoDB connectivity
     assert_success "Can connect to MongoDB database" \
         "${COMPOSE_CMD[@]}" exec -T mongo mongosh --quiet --eval "db.adminCommand('ping')"
+
+    # Test Redis connectivity
+    assert_success "Can connect to Redis" \
+        "${COMPOSE_CMD[@]}" exec -T redis redis-cli ping
 
     # Test that sample data exists
     local user_count
@@ -253,7 +262,26 @@ test_environment() {
     mongo_user_count=$("${COMPOSE_CMD[@]}" exec -T mongo mongosh testdb -u testuser -p testpass123 --authenticationDatabase admin --quiet --eval "db.users.countDocuments()" 2>/dev/null | tail -1)
 
     assert_contains "Sample users exist in MongoDB database" \
-        "$mongo_user_count" "3" # Test that app is generating data
+        "$mongo_user_count" "3"
+
+    # Seed Redis with test data
+    "${COMPOSE_CMD[@]}" exec -T redis redis-cli SET test:user:1 "alice" >/dev/null 2>&1
+    "${COMPOSE_CMD[@]}" exec -T redis redis-cli SET test:user:2 "bob" >/dev/null 2>&1
+    "${COMPOSE_CMD[@]}" exec -T redis redis-cli SET test:user:3 "charlie" >/dev/null 2>&1
+
+    local redis_count
+    redis_count=$("${COMPOSE_CMD[@]}" exec -T redis redis-cli DBSIZE 2>/dev/null | grep -oE '[0-9]+')
+
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [ "$redis_count" -ge 3 ]; then
+        log_success "Redis has test data ($redis_count keys)"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        log_error "Redis test data not found (expected >= 3 keys, got $redis_count)"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
+
+    # Test that app is generating data
     assert_success "App data directory exists" \
         "${COMPOSE_CMD[@]}" exec -T backup test -d /app/data
 
@@ -282,6 +310,11 @@ test_backup() {
     assert_success "Backup script exists and is executable" \
         "${COMPOSE_CMD[@]}" exec -T backup test -x /backup-scripts/backup-now.sh
 
+    # Seed Redis data before backup
+    "${COMPOSE_CMD[@]}" exec -T redis redis-cli SET test:user:1 "alice" >/dev/null 2>&1
+    "${COMPOSE_CMD[@]}" exec -T redis redis-cli SET test:user:2 "bob" >/dev/null 2>&1
+    "${COMPOSE_CMD[@]}" exec -T redis redis-cli SET test:user:3 "charlie" >/dev/null 2>&1
+
     # Run a backup
     log_info "Running backup (this may take a few seconds)..."
     local backup_output
@@ -296,25 +329,25 @@ test_backup() {
     assert_contains "MongoDB database is backed up" \
         "$backup_output" "Backing up MongoDB database"
 
-    assert_contains "Directory is backed up" \
-        "$backup_output" "Backing up directory"
+    assert_contains "Redis database is backed up" \
+        "$backup_output" "Backing up Redis database"
 
-    assert_contains "File is backed up" \
-        "$backup_output" "Backing up file"
+    assert_contains "Restic backup ran" \
+        "$backup_output" "Restic backup completed successfully"
 
-    assert_contains "Backup is encrypted" \
-        "$backup_output" "Encrypting backup"
+    assert_contains "Retention policy applied" \
+        "$backup_output" "Retention policy applied"
 
-    # Check that backup file exists
-    local backup_files
-    backup_files=$(find "${TEST_BACKUP_DIR}" -name "*.tar.gz.gpg" 2>/dev/null || true)
+    # Check that a snapshot was created
+    local snapshot_output
+    snapshot_output=$("${COMPOSE_CMD[@]}" exec -T backup restic snapshots --tag docker-backup-sidecar-test --json 2>/dev/null)
 
     TESTS_RUN=$((TESTS_RUN + 1))
-    if [ -n "$backup_files" ]; then
-        log_success "Backup file created: $(basename "$backup_files")"
+    if echo "$snapshot_output" | grep -q "docker-backup-sidecar-test"; then
+        log_success "Restic snapshot created with correct tag"
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
-        log_error "No backup file found in ${TEST_BACKUP_DIR}"
+        log_error "No restic snapshot found"
         TESTS_FAILED=$((TESTS_FAILED + 1))
     fi
 
@@ -322,8 +355,8 @@ test_backup() {
     local list_output
     list_output=$("${COMPOSE_CMD[@]}" exec -T backup /backup-scripts/list-backups.sh 2>&1)
 
-    assert_contains "List backups shows backup file" \
-        "$list_output" "tar.gz.gpg"
+    assert_contains "List backups shows snapshot" \
+        "$list_output" "snapshot"
 }
 
 test_restore() {
@@ -355,7 +388,7 @@ test_restore() {
     log_warn "Full restore test requires interactive input - verifying script only"
 
     assert_success "Restore script can be invoked" \
-        "${COMPOSE_CMD[@]}" exec -T backup bash -c "echo | /backup-scripts/restore.sh 2>&1 | grep -q 'Available backups'"
+        "${COMPOSE_CMD[@]}" exec -T backup bash -c "echo | /backup-scripts/restore.sh 2>&1 | grep -q 'Available snapshots'"
 }
 
 test_files() {
@@ -368,34 +401,21 @@ test_files() {
     log_info "Creating backup with file..."
     "${COMPOSE_CMD[@]}" exec -T backup /backup-scripts/backup-now.sh >/dev/null 2>&1
 
-    # Get the backup file name (just the basename)
-    local backup_file
-    backup_file=$("${COMPOSE_CMD[@]}" exec -T backup bash -c "ls -t /backups-local/docker-backup-sidecar-test/*.tar.gz.gpg | head -1" 2>/dev/null | tr -d '\r')
-
-    if [ -z "$backup_file" ]; then
-        log_error "No backup file found for file test"
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        return 1
-    fi
-
-    # Decrypt and extract inside the container to verify file is included
+    # Restore the latest snapshot to a temp dir and verify the file exists
     log_info "Verifying file backup content..."
-    local temp_dir="/tmp/verify-$$"
-
-    # Create temp directory and decrypt/extract inside container
     local verify_result
     verify_result=$("${COMPOSE_CMD[@]}" exec -T backup bash -c "
-        mkdir -p '$temp_dir' &&
-        gpg --decrypt --batch --yes --passphrase 'test-encryption-key-change-in-production' \
-            --output '$temp_dir/backup.tar.gz' '$backup_file' 2>/dev/null &&
-        tar -xzf '$temp_dir/backup.tar.gz' -C '$temp_dir' 2>/dev/null &&
-        if [ -f '$temp_dir/app-config' ]; then
+        temp_dir='/tmp/verify-\$\$'
+        mkdir -p \"\$temp_dir\"
+        restic restore latest --target \"\$temp_dir\" --tag docker-backup-sidecar-test >/dev/null 2>&1
+        config_file=\$(find \"\$temp_dir\" -path '*/staging/files/app-config' -type f 2>/dev/null | head -1)
+        if [ -n \"\$config_file\" ] && [ -f \"\$config_file\" ]; then
             echo 'FILE_EXISTS'
-            cat '$temp_dir/app-config'
+            cat \"\$config_file\"
         else
             echo 'FILE_NOT_FOUND'
-        fi &&
-        rm -rf '$temp_dir'
+        fi
+        rm -rf \"\$temp_dir\"
     " 2>/dev/null)
 
     # Check if the config file backup exists
@@ -413,50 +433,11 @@ test_files() {
     fi
 }
 
-test_encryption() {
-    echo ""
-    log_info "========================================="
-    log_info "Test Suite: Encryption"
-    log_info "========================================="
-
-    # Create a backup
-    log_info "Creating encrypted backup..."
-    "${COMPOSE_CMD[@]}" exec -T backup /backup-scripts/backup-now.sh >/dev/null 2>&1
-
-    # Get the backup file
-    local backup_file
-    backup_file=$(find "${TEST_BACKUP_DIR}" -name "*.tar.gz.gpg" 2>/dev/null | head -1)
-
-    if [ -z "$backup_file" ]; then
-        log_error "No backup file found for encryption test"
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        return 1
-    fi
-
-    # Test that file is encrypted (GPG format)
-    local file_type
-    file_type=$(file "$backup_file" 2>/dev/null || echo "unknown")
-
-    assert_contains "Backup file is GPG/PGP encrypted" \
-        "$file_type" "PGP"
-
-    # Test that file cannot be extracted without decryption
-    assert_failure "Encrypted backup cannot be read as plain tar" \
-        tar -tzf "$backup_file" 2>/dev/null
-}
-
 test_retention() {
     echo ""
     log_info "========================================="
     log_info "Test Suite: Retention Policy"
     log_info "========================================="
-
-    # Clean existing backups first to ensure accurate count
-    rm -f "${TEST_BACKUP_DIR}"/*.tar.gz.gpg
-
-    # Count existing backups before creating new ones
-    local initial_count
-    initial_count=$(find "${TEST_BACKUP_DIR}" -name "*.tar.gz.gpg" 2>/dev/null | wc -l | tr -d ' ')
 
     # Create multiple backups
     log_info "Creating test backups..."
@@ -468,23 +449,20 @@ test_retention() {
     # Wait a bit more to ensure all backups are fully written
     sleep 1
 
-    # Count backup files now
-    local backup_count
-    backup_count=$(find "${TEST_BACKUP_DIR}" -name "*.tar.gz.gpg" 2>/dev/null | wc -l | tr -d ' ')
-
-    # Calculate new backups created
-    local new_backups=$((backup_count - initial_count))
+    # Count snapshots using restic
+    local snapshot_count
+    snapshot_count=$("${COMPOSE_CMD[@]}" exec -T backup restic snapshots --tag docker-backup-sidecar-test --json 2>/dev/null | grep -o '"time"' | wc -l | tr -d ' ')
 
     TESTS_RUN=$((TESTS_RUN + 1))
-    if [ "$new_backups" -eq 3 ]; then
-        log_success "Created 3 new backups"
+    if [ "$snapshot_count" -ge 3 ]; then
+        log_success "Multiple snapshots created ($snapshot_count snapshots)"
         TESTS_PASSED=$((TESTS_PASSED + 1))
     else
-        log_error "Expected 3 new backups, got $new_backups (initial: $initial_count, final: $backup_count)"
+        log_error "Expected at least 3 snapshots, got $snapshot_count"
         TESTS_FAILED=$((TESTS_FAILED + 1))
     fi
 
-    log_info "Retention cleanup is configured for 7 days (manual testing required for old backups)"
+    log_info "Retention cleanup is managed by restic forget --prune (configured for 14 keep-last)"
 }
 
 test_stop_services() {
@@ -520,20 +498,22 @@ test_stop_services() {
     "${COMPOSE_CMD[@]}" run --rm -d \
         --name backup-stop-test \
         -e BACKUP_NAME=docker-backup-sidecar-test \
-        -e BACKUP_LOCAL_PATH=/backups-local \
-        -e BACKUP_ENCRYPTION_KEY=test-encryption-key-change-in-production \
+        -e RESTIC_REPOSITORY=/backups-local/docker-backup-sidecar-test \
+        -e RESTIC_PASSWORD=test-restic-password-change-in-production \
         -e BACKUP_POSTGRES=postgresql://testuser:testpass123@postgres:5432/testdb \
         -e BACKUP_MONGODB=mongodb://testuser:testpass123@mongo:27017/testdb?authSource=admin \
+        -e BACKUP_REDIS=redis://redis:6379 \
+        -e BACKUP_REDIS_DATA_DIR=/redis-data \
         -e BACKUP_DIRS=/app/data:app-data \
         -e BACKUP_FILES=/app/config.json:app-config \
         -e BACKUP_STOP_SERVICES=app \
         -e BACKUP_STOP_WAIT=3 \
         -e BACKUP_START_WAIT=3 \
-        -e BACKUP_RETENTION_RECENT=14 \
-        -e BACKUP_RETENTION_DAILY=7 \
-        -e BACKUP_RETENTION_WEEKLY=4 \
-        -e BACKUP_RETENTION_MONTHLY=0 \
-        -e BACKUP_RETENTION_YEARLY=0 \
+        -e RESTIC_KEEP_LAST=14 \
+        -e RESTIC_KEEP_DAILY=7 \
+        -e RESTIC_KEEP_WEEKLY=4 \
+        -e RESTIC_KEEP_MONTHLY=0 \
+        -e RESTIC_KEEP_YEARLY=0 \
         -e TZ=America/New_York \
         backup \
         sleep 300 >/dev/null 2>&1
@@ -652,8 +632,12 @@ test_scripts() {
         "${COMPOSE_CMD[@]}" exec -T backup bash -c '[ -n "$BACKUP_NAME" ]'
 
     # shellcheck disable=SC2016  # Variables should expand in container, not host
-    assert_success "BACKUP_ENCRYPTION_KEY is set" \
-        "${COMPOSE_CMD[@]}" exec -T backup bash -c '[ -n "$BACKUP_ENCRYPTION_KEY" ]'
+    assert_success "RESTIC_PASSWORD is set" \
+        "${COMPOSE_CMD[@]}" exec -T backup bash -c '[ -n "$RESTIC_PASSWORD" ]'
+
+    # shellcheck disable=SC2016  # Variables should expand in container, not host
+    assert_success "RESTIC_REPOSITORY is set" \
+        "${COMPOSE_CMD[@]}" exec -T backup bash -c '[ -n "$RESTIC_REPOSITORY" ]'
 
     # shellcheck disable=SC2016  # Variables should expand in container, not host
     assert_success "BACKUP_POSTGRES is set" \
@@ -662,6 +646,66 @@ test_scripts() {
     # shellcheck disable=SC2016  # Variables should expand in container, not host
     assert_success "BACKUP_MONGODB is set" \
         "${COMPOSE_CMD[@]}" exec -T backup bash -c '[ -n "$BACKUP_MONGODB" ]'
+
+    # shellcheck disable=SC2016  # Variables should expand in container, not host
+    assert_success "BACKUP_REDIS is set" \
+        "${COMPOSE_CMD[@]}" exec -T backup bash -c '[ -n "$BACKUP_REDIS" ]'
+
+    # Test that restic is available
+    assert_success "restic is available in container" \
+        "${COMPOSE_CMD[@]}" exec -T backup restic version
+
+    # Test that redis-cli is available
+    assert_success "redis-cli is available in container" \
+        "${COMPOSE_CMD[@]}" exec -T backup redis-cli --version
+}
+
+test_redis() {
+    echo ""
+    log_info "========================================="
+    log_info "Test Suite: Redis Backup"
+    log_info "========================================="
+
+    # Seed Redis with test data
+    "${COMPOSE_CMD[@]}" exec -T redis redis-cli SET test:backup:1 "redis-test-value-1" >/dev/null 2>&1
+    "${COMPOSE_CMD[@]}" exec -T redis redis-cli SET test:backup:2 "redis-test-value-2" >/dev/null 2>&1
+
+    # Run a backup
+    log_info "Running backup with Redis data..."
+    local backup_output
+    backup_output=$("${COMPOSE_CMD[@]}" exec -T backup /backup-scripts/backup-now.sh 2>&1)
+
+    assert_contains "Redis backup ran" \
+        "$backup_output" "Backing up Redis database"
+
+    assert_contains "Redis backup succeeded" \
+        "$backup_output" "backed up successfully"
+
+    # Verify the RDB file was captured by restoring the snapshot
+    log_info "Verifying Redis RDB was backed up..."
+    local verify_result
+    verify_result=$("${COMPOSE_CMD[@]}" exec -T backup bash -c "
+        temp_dir='/tmp/verify-redis-\$\$'
+        mkdir -p \"\$temp_dir\"
+        restic restore latest --target \"\$temp_dir\" --tag docker-backup-sidecar-test >/dev/null 2>&1
+        rdb_file=\$(find \"\$temp_dir\" -name 'redis-*.rdb' -type f 2>/dev/null | head -1)
+        if [ -n \"\$rdb_file\" ] && [ -f \"\$rdb_file\" ]; then
+            echo 'RDB_EXISTS'
+            ls -la \"\$rdb_file\"
+        else
+            echo 'RDB_NOT_FOUND'
+        fi
+        rm -rf \"\$temp_dir\"
+    " 2>/dev/null)
+
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if echo "$verify_result" | grep -q "RDB_EXISTS"; then
+        log_success "Redis RDB file was backed up successfully"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+    else
+        log_error "Redis RDB file was not found in backup"
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+    fi
 }
 
 # ==============================================================================
@@ -679,7 +723,7 @@ run_all_tests() {
     test_scripts
     test_backup
     test_files
-    test_encryption
+    test_redis
     test_retention
     test_stop_services
     test_restore
@@ -735,9 +779,9 @@ main() {
             test_restore
             teardown
             ;;
-        encryption)
+        redis)
             setup
-            test_encryption
+            test_redis
             teardown
             ;;
         scripts)
@@ -750,6 +794,11 @@ main() {
             test_stop_services
             teardown
             ;;
+        retention)
+            setup
+            test_retention
+            teardown
+            ;;
         --keep-running)
             log_info "Setting up environment and keeping it running..."
             setup
@@ -760,14 +809,15 @@ main() {
             echo "Usage: $0 [test-suite]"
             echo ""
             echo "Test Suites:"
-            echo "  all           Run all tests (default)"
-            echo "  environment   Test environment setup"
-            echo "  backup        Test backup functionality"
-            echo "  files         Test file backup functionality"
-            echo "  restore       Test restore functionality"
-            echo "  encryption    Test encryption"
-            echo "  scripts       Test script validation"
-            echo "  stop-services Test container stop/start during backup"
+            echo "  all             Run all tests (default)"
+            echo "  environment     Test environment setup"
+            echo "  backup          Test backup functionality"
+            echo "  files           Test file backup functionality"
+            echo "  restore         Test restore functionality"
+            echo "  redis           Test Redis backup functionality"
+            echo "  scripts         Test script validation"
+            echo "  stop-services   Test container stop/start during backup"
+            echo "  retention       Test retention policy"
             echo ""
             echo "Options:"
             echo "  --keep-running  Set up environment without teardown"

@@ -6,13 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Replaced tar.gz + GPG encryption with restic backup engine
+- Replaced `BACKUP_ENCRYPTION_KEY` with `RESTIC_PASSWORD`
+- Replaced `BACKUP_LOCAL_PATH` and `BACKUP_S3_*` with `RESTIC_REPOSITORY`
+- Replaced `BACKUP_RETENTION_*` with `RESTIC_KEEP_*`
+- Restore now uses snapshot IDs instead of timestamps
+- Removed aws-cli and gnupg from Docker image
+- Updated PostgreSQL client versions from 15/16/17 to 16/17/18
+
 ### Added
 
-- Initial release of docker-backup-sidecar
-- Core backup functionality for PostgreSQL, MongoDB, files, and directories
-- Encryption, scheduling, and retention management
-- Local and S3 storage support
-- Complete test coverage
+- Restic-based incremental/deduplicated backups
+- Built-in encryption via restic (AES-256)
+- Support for any restic backend (S3, B2, SFTP, REST, local, etc.)
+- Redis RDB snapshot backup and restore via `BACKUP_REDIS`
+- `BACKUP_REDIS_DATA_DIR` env var for Redis data directory mapping
+- Automatic restic repository initialization on first backup
+- PostgreSQL 18 client support
+
+### Removed
+
+- GPG encryption (replaced by restic's built-in encryption)
+- aws-cli (replaced by restic's native S3 support)
+- Custom GFS retention logic (replaced by `restic forget --prune`)
+- tar.gz archive creation (replaced by restic's content-addressed storage)
+- PostgreSQL 15 client (no longer available in Alpine 3.23)
 
 ### Documentation
 
