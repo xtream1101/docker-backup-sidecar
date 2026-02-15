@@ -182,8 +182,11 @@ restore_postgres() {
             # (e.g. inherited constraints from pgboss/partitioned tables)
             # Only fail if it's not just "errors ignored on restore"
             if echo "$restore_output" | grep -q "errors ignored on restore"; then
-                log_warn "PostgreSQL restore for $database completed with non-fatal warnings:"
-                echo "$restore_output" | grep -E "^pg_restore" | tail -5 >&2
+                local ignored_count
+                ignored_count=$(echo "$restore_output" | grep -oP 'errors ignored on restore: \K[0-9]+' || echo "some")
+                log_info "PostgreSQL restore for $database completed ($ignored_count non-fatal warnings ignored)"
+                log_debug "pg_restore warnings for $database:"
+                echo "$restore_output" | grep -E "^pg_restore" | while IFS= read -r warn_line; do log_debug "  $warn_line"; done
             else
                 log_error "$restore_output"
                 send_failure "PostgreSQL restore failed for $database"

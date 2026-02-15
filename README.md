@@ -58,12 +58,15 @@ services:
       - app-data:/data:ro
       # Local backup storage (restic repo)
       - ./backups:/backups-local
+      # Restic cache (speeds up repeated operations)
+      - restic-cache:/root/.cache/restic
     # No command needed! The entrypoint handles cron setup automatically
     # based on BACKUP_SCHEDULE environment variable
 
 volumes:
   app-data:
   db-data:
+  restic-cache:
 ```
 
 ### 2. Configure your .env file

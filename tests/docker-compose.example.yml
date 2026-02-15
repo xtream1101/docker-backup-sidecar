@@ -120,6 +120,8 @@ services:
       - redis-data:/redis-data:ro
       # Local backup storage (restic repo lives here)
       - ./test-backups:/backups-local
+      # Restic cache (speeds up repeated operations)
+      - restic-cache:/root/.cache/restic
     depends_on:
       postgres:
         condition: service_healthy
@@ -135,3 +137,4 @@ volumes:
   postgres-data:
   mongo-data:
   redis-data:
+  restic-cache:
