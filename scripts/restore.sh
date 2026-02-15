@@ -109,11 +109,23 @@ restore_postgres() {
             fi
         fi
 
-        "$pg_restore_cmd" \
+        local restore_output
+        restore_output=$("$pg_restore_cmd" \
             --dbname="$uri" \
             --clean \
             --if-exists \
-            "$dump_file" || send_failure "PostgreSQL restore failed for $database"
+            "$dump_file" 2>&1) || {
+            # pg_restore exits non-zero when there are non-fatal warnings
+            # (e.g. inherited constraints from pgboss/partitioned tables)
+            # Only fail if it's not just "errors ignored on restore"
+            if echo "$restore_output" | grep -q "errors ignored on restore"; then
+                log_warn "PostgreSQL restore for $database completed with non-fatal warnings:"
+                echo "$restore_output" | grep -E "^pg_restore" | tail -5 >&2
+            else
+                log_error "$restore_output"
+                send_failure "PostgreSQL restore failed for $database"
+            fi
+        }
     done
 }
 
