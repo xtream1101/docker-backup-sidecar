@@ -181,26 +181,6 @@ AWS_ACCESS_KEY_ID=your-access-key
 AWS_SECRET_ACCESS_KEY=your-secret-key
 ```
 
-#### Backblaze B2
-
-```bash
-RESTIC_REPOSITORY=b2:bucket-name:myapp
-B2_ACCOUNT_ID=your-account-id
-B2_ACCOUNT_KEY=your-account-key
-```
-
-#### SFTP
-
-```bash
-RESTIC_REPOSITORY=sftp:user@host:/backups/myapp
-```
-
-#### REST Server
-
-```bash
-RESTIC_REPOSITORY=rest:http://host:8000/myapp
-```
-
 ### Database Configuration
 
 #### PostgreSQL
@@ -214,9 +194,8 @@ BACKUP_POSTGRES=postgresql://postgres:mypassword@db:5432/mydb
 # With environment variable for password
 BACKUP_POSTGRES=postgresql://postgres:${DB_PASSWORD}@db:5432/myapp
 
-# Multiple databases (one per line in your .env file)
+# Databases (one per line in your .env file)
 BACKUP_POSTGRES=postgresql://postgres:pass@db:5432/db1
-postgresql://postgres:pass@db:5432/db2
 
 # With SSL options
 BACKUP_POSTGRES=postgresql://user:pass@db:5432/mydb?sslmode=require

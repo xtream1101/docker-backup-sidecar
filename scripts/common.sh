@@ -271,6 +271,37 @@ restore_redis() {
 # Service Management
 # ============================================================================
 
+# Find container ID for a service name
+# Resolves compose service names to actual container IDs by checking:
+# 1. Compose labels (finds containers in the same compose project)
+# 2. Direct container name lookup (works with explicit container_name)
+_find_container() {
+    local service="$1"
+
+    # Get our own compose project name from our container's labels
+    local project
+    project=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$(hostname)" 2>/dev/null || true)
+
+    # Find by compose project + service labels (most reliable for compose)
+    if [ -n "$project" ]; then
+        local cid
+        # Use -a to include stopped containers (needed for start_services)
+        cid=$(docker ps -aq --filter "label=com.docker.compose.project=$project" --filter "label=com.docker.compose.service=$service" 2>/dev/null | head -1)
+        if [ -n "$cid" ]; then
+            echo "$cid"
+            return 0
+        fi
+    fi
+
+    # Fallback: try direct container name (works if container_name is set in compose)
+    if docker inspect --format '{{.Id}}' "$service" >/dev/null 2>&1; then
+        docker inspect --format '{{.Id}}' "$service" 2>/dev/null
+        return 0
+    fi
+
+    return 1
+}
+
 # Stop services before backup
 stop_services() {
     local services="${BACKUP_STOP_SERVICES:-}"
@@ -281,46 +312,17 @@ stop_services() {
 
     log_info "Stopping services: $services"
 
-    # Try to detect if we're in a compose environment
-    # Check if we can use docker compose by looking for compose project label
-    local use_compose=false
-    if command -v docker >/dev/null 2>&1; then
-        # Try to detect compose by checking if containers have compose labels
-        for service in ${services//,/ }; do
-            if docker inspect "$service" 2>/dev/null | grep -q "com.docker.compose.project"; then
-                use_compose=true
-                break
-            fi
-        done
-    fi
-
-    # Stop each service
     for service in ${services//,/ }; do
-        local stopped=false
-
-        if [ "$use_compose" = true ]; then
-            log_info "Stopping compose service: $service"
-            # Try docker compose stop (with and without project name)
-            if [ -n "${COMPOSE_PROJECT_NAME:-}" ]; then
-                docker compose -p "$COMPOSE_PROJECT_NAME" stop "$service" 2>/dev/null && stopped=true
+        local container_id
+        if container_id=$(_find_container "$service"); then
+            log_info "Stopping container: $service (${container_id:0:12})"
+            if docker stop "$container_id" >/dev/null 2>&1; then
+                log_debug "Successfully stopped $service"
+            else
+                log_warn "Failed to stop $service - it may not be running"
             fi
-
-            # Fallback to docker compose without project name
-            if [ "$stopped" = false ]; then
-                docker compose stop "$service" 2>/dev/null && stopped=true
-            fi
-        fi
-
-        # Fallback to direct docker stop
-        if [ "$stopped" = false ]; then
-            log_info "Stopping container: $service"
-            docker stop "$service" 2>/dev/null && stopped=true
-        fi
-
-        if [ "$stopped" = false ]; then
-            log_warn "Failed to stop $service - it may not be running or not exist"
         else
-            log_debug "Successfully stopped $service"
+            log_warn "Could not find container for service: $service"
         fi
     done
 
@@ -344,45 +346,17 @@ start_services() {
 
     log_info "Starting services: $services"
 
-    # Try to detect if we're in a compose environment
-    local use_compose=false
-    if command -v docker >/dev/null 2>&1; then
-        # Try to detect compose by checking if containers have compose labels
-        for service in ${services//,/ }; do
-            if docker inspect "$service" 2>/dev/null | grep -q "com.docker.compose.project"; then
-                use_compose=true
-                break
-            fi
-        done
-    fi
-
-    # Start each service
     for service in ${services//,/ }; do
-        local started=false
-
-        if [ "$use_compose" = true ]; then
-            log_info "Starting compose service: $service"
-            # Try docker compose start (with and without project name)
-            if [ -n "${COMPOSE_PROJECT_NAME:-}" ]; then
-                docker compose -p "$COMPOSE_PROJECT_NAME" start "$service" 2>/dev/null && started=true
+        local container_id
+        if container_id=$(_find_container "$service"); then
+            log_info "Starting container: $service (${container_id:0:12})"
+            if docker start "$container_id" >/dev/null 2>&1; then
+                log_debug "Successfully started $service"
+            else
+                log_warn "Failed to start $service"
             fi
-
-            # Fallback to docker compose without project name
-            if [ "$started" = false ]; then
-                docker compose start "$service" 2>/dev/null && started=true
-            fi
-        fi
-
-        # Fallback to direct docker start
-        if [ "$started" = false ]; then
-            log_info "Starting container: $service"
-            docker start "$service" 2>/dev/null && started=true
-        fi
-
-        if [ "$started" = false ]; then
-            log_warn "Failed to start $service"
         else
-            log_debug "Successfully started $service"
+            log_warn "Could not find container for service: $service"
         fi
     done
 

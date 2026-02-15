@@ -22,8 +22,15 @@ restic_init
 rm -rf "$STAGING_DIR"
 mkdir -p "${STAGING_DIR}/databases"
 
-# Cleanup function
+# Track whether services are stopped so cleanup can restart them
+SERVICES_STOPPED=false
+
+# Cleanup function - always restarts services and removes staging files
 cleanup() {
+    if [ "$SERVICES_STOPPED" = true ]; then
+        start_services
+        SERVICES_STOPPED=false
+    fi
     log_info "Cleaning up staging files..."
     rm -rf "$STAGING_DIR"
 }
@@ -31,6 +38,7 @@ trap cleanup EXIT
 
 # Stop services if configured
 stop_services
+SERVICES_STOPPED=true
 
 #
 # DATABASE DUMP FUNCTIONS
@@ -121,9 +129,6 @@ if [ -n "${BACKUP_REDIS:-}" ]; then
     dump_redis "$BACKUP_REDIS" "${STAGING_DIR}/databases"
 fi
 
-# Start services if they were stopped
-start_services
-
 #
 # BUILD RESTIC BACKUP PATHS
 #
@@ -176,6 +181,10 @@ fi
 
 # Run restic backup
 restic_backup "${BACKUP_PATHS[@]}"
+
+# Start services back up now that backup is complete
+start_services
+SERVICES_STOPPED=false
 
 # Apply retention policy
 restic_forget_prune
