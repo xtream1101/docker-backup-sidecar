@@ -45,6 +45,69 @@ trap cleanup EXIT
 # Restore snapshot
 restic_restore "$SNAPSHOT_ID" "$RESTORE_DIR"
 
+# Check if a path is writable, returns 1 if read-only
+is_path_readonly() {
+    local path="$1"
+    local test_file="${path}/.restore-write-test-$$"
+    if ! touch "$test_file" 2>/dev/null; then
+        return 0  # is read-only
+    fi
+    rm -f "$test_file"
+    return 1  # is writable
+}
+
+# Check for read-only mounts that need to be writable for restore
+check_readonly_paths() {
+    local ro_count=0
+
+    # Check directories from BACKUP_DIRS
+    if [ -n "${BACKUP_DIRS:-}" ]; then
+        while IFS= read -r line; do
+            [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+            IFS=':' read -r path name <<<"$line"
+            path=$(echo "$path" | xargs)
+            if [ -d "$path" ] && is_path_readonly "$path"; then
+                log_warn "READ-ONLY: $path (from BACKUP_DIRS) - restore will fail for this directory"
+                ro_count=$((ro_count + 1))
+            fi
+        done < <(echo "$BACKUP_DIRS" | tr ',' '\n')
+    fi
+
+    # Check file paths from BACKUP_FILES
+    if [ -n "${BACKUP_FILES:-}" ]; then
+        while IFS= read -r line; do
+            [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+            IFS=':' read -r filepath name <<<"$line"
+            filepath=$(echo "$filepath" | xargs)
+            local dir
+            dir=$(dirname "$filepath")
+            if [ -d "$dir" ] && is_path_readonly "$dir"; then
+                log_warn "READ-ONLY: $dir (parent of $filepath from BACKUP_FILES) - restore will fail for this file"
+                ro_count=$((ro_count + 1))
+            fi
+        done < <(echo "$BACKUP_FILES" | tr ',' '\n')
+    fi
+
+    # Check Redis data directory
+    if [ -n "${BACKUP_REDIS:-}" ]; then
+        local redis_data_dir="${BACKUP_REDIS_DATA_DIR:-/redis-data}"
+        if [ -d "$redis_data_dir" ] && is_path_readonly "$redis_data_dir"; then
+            log_warn "READ-ONLY: $redis_data_dir (Redis data dir) - restore will fail for Redis"
+            ro_count=$((ro_count + 1))
+        fi
+    fi
+
+    if [ "$ro_count" -gt 0 ]; then
+        log_error ""
+        log_error "Found $ro_count read-only path(s). Cannot restore."
+        log_error "Update your docker-compose.yml to remove ':ro' from the affected volume mounts,"
+        log_error "then recreate the container and try again."
+        exit 1
+    fi
+}
+
+check_readonly_paths
+
 # Confirm restore operation
 log_warn "WARNING: This will overwrite existing data!"
 log_info "Press Ctrl+C within 10 seconds to cancel..."
